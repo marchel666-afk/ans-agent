@@ -1,0 +1,12 @@
+services:
+  ans-agent:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./workspace:/workspace
+      - ./config:/app/config:ro
+    working_dir: /app
+    restart: unless-stopped
