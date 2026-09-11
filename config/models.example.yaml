@@ -1,0 +1,79 @@
+# Copy to config/models.yaml and adapt locally.
+# Never commit API keys or session tokens.
+
+providers:
+  anthropic:
+    kind: anthropic
+    enabled: true
+    secret_env: ANTHROPIC_API_KEY
+
+  openai:
+    kind: openai
+    enabled: true
+    secret_env: OPENAI_API_KEY
+
+  google:
+    kind: gemini
+    enabled: true
+    secret_env: GEMINI_API_KEY
+
+  openrouter:
+    kind: openai-compatible
+    enabled: true
+    base_url: https://openrouter.ai/api/v1
+    secret_env: OPENROUTER_API_KEY
+
+  ollama:
+    kind: openai-compatible
+    enabled: false
+    base_url: http://localhost:11434/v1
+
+roles:
+  planner:
+    candidates:
+      - openai/gpt
+      - anthropic/claude
+      - google/gemini
+      - openrouter/free
+
+  researcher:
+    candidates:
+      - google/gemini
+      - openrouter/free
+
+  architect:
+    candidates:
+      - anthropic/claude
+      - openai/gpt
+
+  executor:
+    candidates:
+      - anthropic/claude-code
+
+  reviewer:
+    candidates:
+      - openai/gpt
+      - anthropic/claude
+      - openrouter/free
+
+  tester:
+    candidates:
+      - anthropic/claude-code
+
+  judge:
+    candidates:
+      - anthropic/claude
+      - openai/gpt
+
+routing:
+  default_role: planner
+  max_retries_per_provider: 2
+  max_iterations: 30
+  prefer_free_for:
+    - simple_question
+    - summarization
+    - classification
+    - low_risk_research
+  require_premium_for:
+    - production_deploy
+    - destructive_change
