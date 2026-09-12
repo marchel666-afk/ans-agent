@@ -8,9 +8,17 @@ class RouteDecision:
  reason: str
 class ModelRouter:
  def __init__(self,registry=None): self.registry=registry or ModelRegistry.default(); self.failures={}
+ def refresh_free_pool(self):
+  if os.getenv("OPENROUTER_API_KEY"):
+   for m in self.registry.models:
+    if m.provider=="openrouter" and m.model=="openrouter/free": m.free=True
+  return self.pool()
  def _available(self,m):
   keys={"anthropic":"ANTHROPIC_API_KEY","openai":"OPENAI_API_KEY","google":"GEMINI_API_KEY","openrouter":"OPENROUTER_API_KEY"}
-  return m.provider=="ollama" or bool(os.getenv(keys.get(m.provider,""))) or m.provider=="anthropic"
+  return m.provider=="ollama" or bool(os.getenv(keys.get(m.provider,""))) or (m.provider=="anthropic" and self._claude_cli_available())
+ def _claude_cli_available(self):
+  import shutil
+  return shutil.which("claude") is not None
  def rank(self,role,requires_tools=False,prefer_free=False):
   cs=self.registry.for_role(role)
   if requires_tools: cs=[m for m in cs if m.tool_capable]
