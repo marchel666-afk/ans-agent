@@ -161,6 +161,7 @@ async def run(req:RunRequest,_:None=Depends(auth)):
     emit("run.started","Task accepted",mode=req.mode)
     try:
         orch=Orchestrator(router,WORKSPACE,emit=emit,approval=approvals,session_id=s.id)
+        orch.job_manager=jobs
         profile=profiles.get(req.profile)
         orch.profile=profile
         def worker(job):
