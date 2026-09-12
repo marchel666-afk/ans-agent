@@ -11,3 +11,17 @@ def test_cancel(tmp_path):
  jm=JobManager(str(tmp_path/"jobs.db")); j=jm.submit("s",lambda job: {"ok":1})
  assert jm.cancel(j.id)
  assert jm.get(j.id).status=="cancelled"
+
+
+def test_job_lifecycle_records_attempt(tmp_path):
+ import time
+ jm=JobManager(str(tmp_path/"jobs.db"))
+ j=jm.submit("s",lambda job: {"status":"ok","job_id":job.id})
+ for _ in range(100):
+  if jm.get(j.id).status=="completed": break
+  time.sleep(.01)
+ r=jm.get(j.id)
+ assert r.status=="completed"
+ assert r.result["status"]=="ok"
+ assert len(r.attempts)==1
+ assert r.attempts[0]["status"]=="completed"
