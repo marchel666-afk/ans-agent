@@ -32,6 +32,8 @@ class Orchestrator:
 
     def run(self,task,mode="agent",max_iterations=30):
         state=AgentState(task=task,mode=TaskMode(mode),max_iterations=max_iterations)
+        profile=getattr(self,"profile",None)
+        if profile: self.emit("profile.selected",profile.name,planner=profile.planner,executor=profile.executor,reviewer=profile.reviewer)
         plan_text=self.call("planner","Create an ordered implementation plan. Return one step per line.\n\nTASK:\n"+task)
         state.plan=[x.strip("- •0123456789.\t") for x in plan_text.splitlines() if x.strip()]
         if mode=="chat": return {"status":"completed","plan":[],"output":plan_text,"iterations":0}
