@@ -6,6 +6,7 @@ from .tool_executor import ToolExecutor
 from .tool_loop import ToolLoop
 from .task_graph import TaskGraph
 from .git_workspace import GitWorkspaceManager
+from .memory import ProjectMemory
 import subprocess, os
 
 class Orchestrator:
@@ -17,6 +18,7 @@ class Orchestrator:
         self.emit=emit or (lambda *a,**k:None)
         self.approval=approval
         self.session_id=session_id
+        self.memory=None
 
     def call(self,role,prompt,prefer_free=False,tools=False):
         profile=getattr(self,"profile",None)
@@ -44,6 +46,9 @@ class Orchestrator:
 
     def run(self,task,mode="agent",max_iterations=30):
         state=AgentState(task=task,mode=TaskMode(mode),max_iterations=max_iterations)
+        if self.memory:
+            context=self.memory.get_context()
+            task="PROJECT MEMORY:\n"+context+"\n\nTASK:\n"+task
         profile=getattr(self,"profile",None)
         if profile: self.emit("profile.selected",profile.name,planner=profile.planner,executor=profile.executor,reviewer=profile.reviewer)
         plan_text=self.call("planner","Create an ordered implementation plan. Return one step per line.\n\nTASK:\n"+task)
