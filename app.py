@@ -15,12 +15,23 @@ from core.github import GitHubService
 from core.jobs import JobManager
 from core.security import get_token
 from core.profiles import ProfileRegistry
-import asyncio, os
+import asyncio, os, subprocess
 
 app=FastAPI(title="ANS Agent")
 app.mount("/web", StaticFiles(directory="web"), name="web")
 router=ModelRouter(); sessions=SessionStore(); events=EventBus(); approvals=ApprovalManager()
 github=GitHubService(); jobs=JobManager(); profiles=ProfileRegistry(); WORKSPACE=os.path.abspath(os.getenv("ANS_WORKSPACE","./workspace")); AUTH_TOKEN=get_token()
+
+def bootstrap_workspace():
+    # Only bootstrap the default/explicitly missing workspace; never alter an existing project.
+    if not os.path.isdir(WORKSPACE):
+        os.makedirs(WORKSPACE, exist_ok=True)
+        try:
+            subprocess.run(["git","init"],cwd=WORKSPACE,check=True,capture_output=True,text=True)
+        except Exception:
+            pass
+
+bootstrap_workspace()
 
 class RouteRequest(BaseModel):
     role:str
