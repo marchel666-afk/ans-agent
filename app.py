@@ -165,6 +165,8 @@ async def run(req:RunRequest,_:None=Depends(auth)):
         profile=profiles.get(req.profile)
         orch.profile=profile
         def worker(job):
+            orch.job=job
+            orch.job_manager=jobs
             if job.cancel_requested: return {"status":"cancelled"}
             if req.mode=="best_of_n": result=BestOfN(orch).run(req.task)
             else: result=orch.run(req.task,req.mode,max(1,min(req.max_iterations,30)))
