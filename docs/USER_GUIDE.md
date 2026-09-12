@@ -42,7 +42,9 @@ Start:
 
     python run.py
 
-Open `http://127.0.0.1:8080`. The first protected request asks for the generated ANS token. On Windows it is `data\\auth.token`; on Linux/macOS it is `data/auth.token`.
+Open `http://127.0.0.1:8080`.
+
+For the Docker deployment, use port `8000` internally and put Nginx/TLS in front of it. The first protected request asks for the generated ANS token. On Windows it is `data\\auth.token`; on Linux/macOS it is `data/auth.token`.
 
 ## 3. Recommended model setup
 
