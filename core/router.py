@@ -154,6 +154,29 @@ class ModelRouter:
  def budget_rank(self,role,budget,requires_tools=False):
   cs=self.rank(role,requires_tools)
   return sorted(cs,key=lambda m:(self.score(m,role),self.cost_estimate(m,4000,2000)/max(budget,0.000001)))
+
+ def policy_rank(self,role,policy="balanced",requires_tools=False,budget=None):
+  policy=(policy or "balanced").lower()
+  if policy not in {"cheap","balanced","quality"}: policy="balanced"
+  cs=self.rank(role,requires_tools)
+  if not cs: return []
+  if budget is not None:
+   cs=[m for m in cs if self.cost_estimate(m,4000,2000)<=budget] or cs
+  def key(m):
+   rs=self._role_outcome(m.model,role); n=rs["tasks"]
+   success=(rs["successes"]+2)/(n+4) if n else .5
+   latency=rs["latency"] or 10
+   cost=self.cost_estimate(m,4000,2000)
+   if policy=="cheap": return (cost, (1-success), latency, self.score(m,role))
+   if policy=="quality": return ((1-success), -m.priority, latency, cost)
+   return (self.score(m,role), cost, latency)
+  return sorted(cs,key=key)
+
+ def choose_policy(self,role,policy="balanced",requires_tools=False,budget=None):
+  cs=self.policy_rank(role,policy,requires_tools,budget)
+  if not cs: raise RuntimeError(f"No model available for role={role!r} policy={policy!r}")
+  return cs[0]
+
  def update_model(self,provider,model,changes):
   for m in self.registry.models:
    if m.provider==provider and m.model==model:
