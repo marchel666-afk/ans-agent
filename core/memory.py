@@ -1,9 +1,8 @@
-from pathlib import Path
-import json
+import os
 class ProjectMemory:
-    def __init__(self,root): self.path=Path(root)/".ans-memory.json"
-    def load(self):
-        if not self.path.exists(): return {"facts":[],"decisions":[],"notes":[]}
-        try:return json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception:return {"facts":[],"decisions":[],"notes":[]}
-    def save(self,data): self.path.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
+ def __init__(self,store,project="default"): self.store=store; self.project=project
+ def get_context(self):
+  m=self.store.memories(self.project)
+  if not m:return "No stored project memory."
+  return "\n".join(f"- {k}: {v}" for k,v in m.items())
+ def remember(self,key,value): self.store.save_memory(self.project,key,value)
