@@ -40,7 +40,7 @@ The worker queue persists job metadata in SQLite, supports cancellation and appr
 
 Use `Agent` for normal execution, `Autopilot` for higher autonomy, and `Best-of-N` when comparing independent solutions.
 
-The first protected API request asks for the token stored in `ANS_AUTH_TOKEN_FILE` (default `data/auth.token`).
+The first protected API request asks for the token stored in `ANS_AUTH_TOKEN_FILE` (default `data/auth.token`). The browser stores the token locally for subsequent API and WebSocket requests.
 
 ## Production
 
