@@ -7,7 +7,7 @@ class RouteDecision:
  candidate: ModelCandidate
  reason: str
 class ModelRouter:
- def __init__(self,registry=None): self.registry=registry or ModelRegistry.default(); self.failures={}
+ def __init__(self,registry=None): self.registry=registry or ModelRegistry.default(); self.failures={}; self.stats={}
  def refresh_free_pool(self):
   if os.getenv("OPENROUTER_API_KEY"):
    for m in self.registry.models:
@@ -26,13 +26,23 @@ class ModelRouter:
    free=[m for m in cs if m.free]
    if free: cs=free
   now=time.time()
-  return sorted([m for m in cs if self._available(m)],key=lambda m:(self.failures.get(m.model,(0,0))[1]>now,m.priority,self.failures.get(m.model,(0,0))[0]))
+  return sorted([m for m in cs if self._available(m)],key=lambda m:(self.failures.get(m.model,(0,0))[1]>now,self.score(m,role),self.failures.get(m.model,(0,0))[0]))
  def choose(self,role,*,requires_tools=False,prefer_free=False):
   cs=self.rank(role,requires_tools,prefer_free)
   if not cs: raise RuntimeError(f"No model available for role={role!r}")
   return cs[0]
+ def score(self,m,role):
+  s=self.stats.get(m.model,{"ok":0,"fail":0,"latency":0.0})
+  success=s["ok"]/(s["ok"]+s["fail"]) if s["ok"]+s["fail"] else 0.5
+  latency=min(s["latency"],120.0) if s["latency"] else 10.0
+  role_bonus=0 if role in m.roles else 100
+  free_bonus=-25 if m.free else 0
+  tool_bonus=-20 if m.tool_capable else 0
+  return role_bonus + m.priority + free_bonus + tool_bonus + (1-success)*30 + latency*.25
  def report_failure(self,m,backoff=30):
-  n,_=self.failures.get(m.model,(0,0));self.failures[m.model]=(n+1,time.time()+min(900,backoff*(2**n)))
+  n,_=self.failures.get(m.model,(0,0));self.failures[m.model]=(n+1,time.time()+min(900,backoff*(2**n))); s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["fail"]+=1
+ def report_latency(self,m,seconds,ok=True):
+  s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["latency"]=seconds if not s["latency"] else s["latency"]*.8+seconds*.2; s["ok" if ok else "fail"]+=1
  def report_success(self,m): self.failures.pop(m.model,None)
 
  def pool(self):
