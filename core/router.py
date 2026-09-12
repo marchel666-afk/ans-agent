@@ -166,3 +166,7 @@ class ModelRouter:
    q+=" GROUP BY model,role"
    rows=c.execute(q,args).fetchall()
   return [{"model":r[0],"role":r[1],"tasks":r[2],"success_rate":round(r[3],3),"latency":round(r[4],3),"tool_calls":round(r[5],2),"repairs":round(r[6],2),"cost":round(r[7],6)} for r in rows]
+
+ def estimate_task_budget(self,role,input_tokens=4000,output_tokens=2000,budget=None,requires_tools=False):
+  ranked=self.budget_rank(role,budget or 0.01,requires_tools)
+  return [{"provider":m.provider,"model":m.model,"estimated_cost":self.cost_estimate(m,input_tokens,output_tokens),"score":self.score(m,role)} for m in ranked]
