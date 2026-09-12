@@ -67,6 +67,9 @@ def models(_:None=Depends(auth)):
              "available":bool(o.adapters.get(m.model) or o.adapters.get(m.provider))}
             for m in router.registry.models]
 
+@app.post("/model-pool/refresh")
+def refresh_model_pool(_:None=Depends(auth)): return router.refresh_free_pool()
+
 @app.get("/model-pool")
 def model_pool(_:None=Depends(auth)): return router.pool()
 
