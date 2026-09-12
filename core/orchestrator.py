@@ -54,8 +54,7 @@ class Orchestrator:
                 self.router.record_task(m,role,False,elapsed)
                 errors.append(f"{m.provider}: {error}")
                 self.emit("provider.failed",error,provider=m.provider,model=m.model,role=role,category=failure["category"],cooldown_seconds=failure["cooldown_seconds"])
-                candidates=self.router.fallback_policy(failure["category"],role,policy)
-                candidates=[x for x in candidates if x.model not in tried]
+                candidates=self.router.fallback_policy(failure["category"],role,policy,exclude=tried)
         raise ProviderError("No available provider: "+"; ".join(errors))
 
     def run(self,task,mode="agent",max_iterations=30,policy="balanced",budget=None):
