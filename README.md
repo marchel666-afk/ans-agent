@@ -28,6 +28,16 @@ Self-hosted multi-model agent workspace inspired by modern agent workbenches.
 
 Open http://127.0.0.1:8080.
 
+## Diagnostics
+
+After startup, use the authenticated `GET /startup` endpoint to verify workspace, Git, Claude Code, model providers, GitHub and job persistence. The response returns `ready` plus per-component checks.
+
+## Tests
+
+    pytest -q
+
+Core smoke tests cover memory, approvals, task graph and model pricing.
+
 ## Production-ready runtime
 
 The worker queue persists job metadata in SQLite, supports cancellation and approval waiting states, and exposes `/health` for container orchestration. The web UI includes agent profiles, job status and Stop control. GitHub work is designed around isolated branches and draft PRs.
