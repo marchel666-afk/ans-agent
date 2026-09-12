@@ -11,6 +11,8 @@ class TaskNode:
     result: Any = None
 
 class TaskGraph:
+    def set_dependencies(self,node_id,deps):
+        self.nodes[node_id].deps=set(deps)
     def __init__(self, titles):
         self.nodes={f"step-{i+1}":TaskNode(f"step-{i+1}",t,set()) for i,t in enumerate(titles)}
         ids=list(self.nodes)
