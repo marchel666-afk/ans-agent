@@ -1,5 +1,5 @@
 const $=id=>document.getElementById(id),timeline=$('timeline');
-let socket=null,currentSession=null,token=localStorage.getItem('ans_token')||'';
+let socket=null,currentSession=null,currentJob=null,token=localStorage.getItem('ans_token')||'';
 const authHeaders=()=>token?{'Authorization':'Bearer '+token}:{};
 function add(kind,msg){if(timeline.querySelector('.empty'))timeline.innerHTML='';const d=document.createElement('div');const b=document.createElement('b');b.textContent=kind;const s=document.createElement('span');s.textContent=' '+msg;d.append(b,s);timeline.appendChild(d);timeline.scrollTop=timeline.scrollHeight}
 function connect(sid){if(socket)socket.close();socket=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws/'+sid+'?token='+encodeURIComponent(token));socket.onmessage=e=>{const x=JSON.parse(e.data);add(x.kind||'EVENT',x.message||'');if(x.kind==='approval.required'){currentSession=sid;$('approval').classList.remove('hidden');$('approvalText').textContent=x.tool+': '+JSON.stringify(x.args||{})}if(x.kind==='run.completed'){$('runstatus').textContent=(x.status||'completed').toUpperCase();load();loadFiles();loadGit();loadDiff()}}}
@@ -10,6 +10,9 @@ async function openFile(path){try{const x=await(await api('/workspace/file?path=
 async function loadGit(){try{$('git').textContent=(await(await api('/workspace/status')).json()).stdout||'Clean working tree'}catch(e){$('git').textContent='Workspace unavailable'}}
 async function loadDiff(){try{$('diff').textContent=(await(await api('/workspace/diff')).json()).diff||'No changes'}catch(e){$('diff').textContent='Workspace unavailable'}}
 async function decide(allow){if(!currentSession)return;await api('/approvals/'+currentSession,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({allow})});$('approval').classList.add('hidden')}
-async function start(){const t=$('task').value.trim();if(!t)return;timeline.innerHTML='';$('runstatus').textContent='RUNNING';try{const r=await api('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task:t,mode:$('mode').value,max_iterations:30})});const x=await r.json();if(!r.ok)throw Error(x.detail||'run failed');currentSession=x.session_id;connect(x.session_id)}catch(e){add('ERROR',e.message);$('runstatus').textContent='FAILED'}}
+async function start(){const t=$('task').value.trim();if(!t)return;timeline.innerHTML='';$('runstatus').textContent='RUNNING';try{const r=await api('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task:t,mode:$('mode').value,max_iterations:30})});const x=await r.json();if(!r.ok)throw Error(x.detail||'run failed');currentSession=x.session_id;currentJob=x.job_id;connect(x.session_id);pollJob()}catch(e){add('ERROR',e.message);$('runstatus').textContent='FAILED'}}
 $('task').addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter')start()});
 load();loadFiles();loadGit();loadDiff();
+
+async function pollJob(){if(!currentJob)return;try{const x=await(await api('/jobs/'+currentJob)).json();$('runstatus').textContent=(x.status||'unknown').toUpperCase();if(['queued','running','waiting'].includes(x.status)){setTimeout(pollJob,1000)}}catch(e){}}
+async function cancelJob(){if(currentJob)await api('/jobs/'+currentJob+'/cancel',{method:'POST'});}
