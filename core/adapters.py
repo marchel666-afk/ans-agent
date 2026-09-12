@@ -45,8 +45,26 @@ class OpenAICompatibleAdapter:
         try: return ProviderResponse(data["choices"][0]["message"]["content"],data)
         except (KeyError,IndexError) as e: raise ProviderError(f"{self.name}: malformed response") from e
 
+class OllamaAdapter:
+    name="ollama/local"
+    def __init__(self,base_url=None,model=None):
+        self.base_url=(base_url or os.getenv("OLLAMA_BASE_URL","http://127.0.0.1:11434")).rstrip("/")
+        self.model=model or os.getenv("OLLAMA_MODEL","")
+    def _model(self, requested=None):
+        return requested or self.model or "llama3.2"
+    def complete(self,prompt,**kwargs):
+        model=self._model(kwargs.get("model"))
+        payload=json.dumps({"model":model,"messages":[{"role":"user","content":prompt}],"stream":False}).encode()
+        req=urllib.request.Request(self.base_url+"/api/chat",data=payload,headers={"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
+        try:
+            with urllib.request.urlopen(req,timeout=kwargs.get("timeout",120)) as r: data=json.load(r)
+        except Exception as e:
+            raise ProviderError(f"{self.name}: {e}") from e
+        try: return ProviderResponse(data["message"]["content"],data)
+        except (KeyError,TypeError) as e: raise ProviderError(f"{self.name}: malformed response") from e
+
 def build_adapters():
-    out={"claude-code":ClaudeCodeAdapter()}
+    out={"claude-code":ClaudeCodeAdapter(), "ollama":OllamaAdapter()}
     if os.getenv("OPENAI_API_KEY"): out["openai"]=OpenAICompatibleAdapter("openai","https://api.openai.com/v1","OPENAI_API_KEY",os.getenv("OPENAI_MODEL","gpt-5"))
     if os.getenv("GEMINI_API_KEY"): out["gemini"]=OpenAICompatibleAdapter("google","https://generativelanguage.googleapis.com/v1beta/openai","GEMINI_API_KEY",os.getenv("GEMINI_MODEL","gemini-2.5-flash"))
     if os.getenv("OPENROUTER_API_KEY"): out["openrouter"]=OpenAICompatibleAdapter("openrouter","https://openrouter.ai/api/v1","OPENROUTER_API_KEY",os.getenv("OPENROUTER_MODEL","openrouter/free"))
