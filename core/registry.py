@@ -13,7 +13,7 @@ class ModelRegistry:
     @classmethod
     def default(cls) -> "ModelRegistry":
         r = cls()
-        r.register(ModelCandidate("anthropic", "claude-code", {"executor", "tester", "fixer"}, tool_capable=True, priority=1))
+        r.register(ModelCandidate("anthropic", "claude-code", {"executor", "tester", "fixer", "planner", "architect", "reviewer", "researcher", "judge"}, tool_capable=True, priority=1))
         r.register(ModelCandidate("openai", "gpt", {"planner", "architect", "reviewer", "judge"}, priority=5))
         r.register(ModelCandidate("google", "gemini", {"researcher", "planner", "reviewer"}, priority=10))
         r.register(ModelCandidate("openrouter", "openrouter/free", {"researcher", "reviewer", "planner"}, free=True, priority=50))
