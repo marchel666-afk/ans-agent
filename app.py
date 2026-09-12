@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header, Depends
-from fastapi.responses import FileResponse\nfrom fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from core.router import ModelRouter
 from core.orchestrator import Orchestrator
@@ -14,7 +15,8 @@ from core.github import GitHubService
 from core.security import get_token
 import asyncio, os
 
-app=FastAPI(title="ANS Agent")\napp.mount("/web", StaticFiles(directory="web"), name="web")
+app=FastAPI(title="ANS Agent")
+app.mount("/web", StaticFiles(directory="web"), name="web")
 router=ModelRouter(); sessions=SessionStore(); events=EventBus(); approvals=ApprovalManager()
 github=GitHubService(); WORKSPACE=os.path.abspath(os.getenv("ANS_WORKSPACE","./workspace")); AUTH_TOKEN=get_token()
 
@@ -116,10 +118,12 @@ async def run(req:RunRequest,_:None=Depends(auth)):
     emit("run.started","Task accepted",mode=req.mode)
     try:
         orch=Orchestrator(router,WORKSPACE,emit=emit,approval=approvals,session_id=s.id)
-        if req.mode=="best_of_n": result=BestOfN(orch).run(req.task)
-        else: result=orch.run(req.task,req.mode,max(1,min(req.max_iterations,30)))
-        emit("run.completed","Run completed",status=result.get("status","completed"))
-        return {"session_id":s.id,**result}
+        async def worker():
+            if req.mode=="best_of_n": result=await asyncio.to_thread(BestOfN(orch).run,req.task)
+            else: result=await asyncio.to_thread(orch.run,req.task,req.mode,max(1,min(req.max_iterations,30)))
+            emit("run.completed","Run completed",status=result.get("status","completed"))
+        asyncio.create_task(worker())
+        return {"session_id":s.id,"status":"running"}
     except Exception as e:
         emit("run.failed",str(e)); raise HTTPException(500,str(e))
 
