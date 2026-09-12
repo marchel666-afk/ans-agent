@@ -64,6 +64,8 @@ class ModelRouter:
   return cs[0]
  def score(self,m,role):
   s=self.stats.get(m.model,{"ok":0,"fail":0,"latency":0.0})
+  role_b=self.benchmarks.get(m.provider+"/"+m.model,{}).get("roles",{}).get(role,{}).get("score")
+  if role_b is not None: return (100-role_b)*0.8 + m.priority - (25 if m.free else 0) - (20 if m.tool_capable else 0)
   success=s["ok"]/(s["ok"]+s["fail"]) if s["ok"]+s["fail"] else 0.5
   latency=min(s["latency"],120.0) if s["latency"] else 10.0
   role_bonus=0 if role in m.roles else 100
