@@ -144,6 +144,10 @@ def cost_estimate(provider:str,model:str,input_tokens:int=4000,output_tokens:int
 @app.get("/learning")
 def learning(role:str|None=None,_:None=Depends(auth)): return router.learning_view(role)
 
+@app.get("/circuit-breakers")
+def circuit_breakers():
+    return {"circuits": ORCH.router.circuit_view()}
+
 @app.get("/model-pool")
 def model_pool(_:None=Depends(auth)): return router.pool()
 
