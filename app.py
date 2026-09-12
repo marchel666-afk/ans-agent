@@ -67,6 +67,19 @@ def models(_:None=Depends(auth)):
              "available":bool(o.adapters.get(m.model) or o.adapters.get(m.provider))}
             for m in router.registry.models]
 
+@app.get("/model-pool")
+def model_pool(_:None=Depends(auth)): return router.pool()
+
+@app.patch("/model-pool/{provider}/{model:path}")
+def update_model(provider:str,model:str,req:dict,_:None=Depends(auth)):
+    try: return router.update_model(provider,model,req)
+    except Exception as e: raise HTTPException(400,str(e))
+
+@app.post("/model-pool/test/{provider}/{model:path}")
+def test_model(provider:str,model:str,_:None=Depends(auth)):
+    try: return router.test_model(provider,model)
+    except Exception as e: raise HTTPException(502,str(e))
+
 @app.post("/route")
 def route(req:RouteRequest,_:None=Depends(auth)):
     return router.choose(req.role,requires_tools=req.requires_tools,prefer_free=req.prefer_free).__dict__
