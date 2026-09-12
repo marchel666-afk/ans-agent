@@ -3,5 +3,6 @@ uvicorn[standard]>=0.30
 pydantic>=2.0
 PyYAML>=6.0
 pytest>=8.0
+httpx2>=0.1
 
 # Optional browser automation: playwright
