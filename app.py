@@ -170,6 +170,7 @@ async def run(req:RunRequest,_:None=Depends(auth)):
             emit("run.completed","Run completed",status=result.get("status","completed"))
             return result
         job=jobs.submit(s.id,worker)
+        orch.job=job
         emit("job.created","Agent job queued",job_id=job.id)
         return {"session_id":s.id,"job_id":job.id,"status":job.status}
     except Exception as e:
