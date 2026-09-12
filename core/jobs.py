@@ -1,8 +1,20 @@
 import json,sqlite3,threading,time,uuid
 from dataclasses import dataclass,field
+
 @dataclass
 class Job:
- id:str=field(default_factory=lambda:str(uuid.uuid4())); session_id:str=""; status:str="queued"; created_at:float=field(default_factory=time.time); started_at:float|None=None; finished_at:float|None=None; result:dict=field(default_factory=dict); error:str|None=None; cancel_requested:bool=False; timeout_seconds:int=3600
+ id:str=field(default_factory=lambda:str(uuid.uuid4()))
+ session_id:str=""
+ status:str="queued"
+ created_at:float=field(default_factory=time.time)
+ started_at:float|None=None
+ finished_at:float|None=None
+ result:dict=field(default_factory=dict)
+ error:str|None=None
+ cancel_requested:bool=False
+ timeout_seconds:int=3600
+ attempts:list=field(default_factory=list)
+
 class JobManager:
  def record_tool(self,name,args):
   self.emit("tool.usage",name,tool=name)
@@ -12,20 +24,20 @@ class JobManager:
   c=sqlite3.connect(self.db_path);c.execute("PRAGMA journal_mode=WAL");return c
  def _init_db(self):
   import os;os.makedirs(os.path.dirname(self.db_path) or ".",exist_ok=True)
-  with self._db() as c:c.execute("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,session_id TEXT,status TEXT,created REAL,started REAL,finished REAL,result TEXT,error TEXT,cancel INTEGER)")
+  with self._db() as c:
+   c.execute("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,session_id TEXT,status TEXT,created REAL,started REAL,finished REAL,result TEXT,error TEXT,cancel INTEGER)")
    try:c.execute("ALTER TABLE jobs ADD COLUMN attempts TEXT DEFAULT '[]'")
    except sqlite3.OperationalError:pass
  def submit(self,session_id,fn,timeout_seconds=3600):
   j=Job(session_id=session_id,timeout_seconds=max(1,int(timeout_seconds)))
-  with self._db() as c:c.execute("INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?)",(j.id,j.session_id,j.status,j.created_at,None,None,"",None,0))
+  with self._db() as c:c.execute("INSERT INTO jobs(id,session_id,status,created,started,finished,result,error,cancel,attempts) VALUES(?,?,?,?,?,?,?,?,?,?)",(j.id,j.session_id,j.status,j.created_at,None,None,"",None,0,"[]"))
   with self.cv:self.jobs[j.id]=j;self.q.append((j.id,fn));self.cv.notify()
   self.emit("job.created","Job queued",job_id=j.id);return j
  def get(self,jid):
   j=self.jobs.get(jid)
   if j:
    if j.status in {"queued","running","waiting"} and j.started_at and time.time()-j.started_at>j.timeout_seconds:
-    j.status="failed"; j.error=f"Job exceeded timeout of {j.timeout_seconds}s"; j.finished_at=time.time(); self._save(j)
-    self.emit("job.timeout",j.error,job_id=j.id)
+    j.status="failed";j.error=f"Job exceeded timeout of {j.timeout_seconds}s";j.finished_at=time.time();self._save(j);self.emit("job.timeout",j.error,job_id=j.id)
    return j
   with self._db() as c:r=c.execute("SELECT * FROM jobs WHERE id=?",(jid,)).fetchone()
   if not r:return None
@@ -54,10 +66,9 @@ class JobManager:
     attempt={"number":len(j.attempts)+1,"started_at":time.time(),"status":"running"}
     j.attempts.append(attempt);self._save(j)
     result=fn(j)
+    if time.time()-j.started_at>j.timeout_seconds:raise TimeoutError(f"Job exceeded timeout of {j.timeout_seconds}s")
     attempt.update({"status":"completed","finished_at":time.time()})
-    if time.time()-j.started_at > j.timeout_seconds:
-     raise TimeoutError(f"Job exceeded timeout of {j.timeout_seconds}s")
-    if j.cancel_requested: j.status="cancelled"; j.finished_at=time.time(); self._save(j); self.emit("job.cancelled","Job cancelled",job_id=j.id)
+    if j.cancel_requested:j.status="cancelled";j.finished_at=time.time();self._save(j);self.emit("job.cancelled","Job cancelled",job_id=j.id)
     elif j.status!="cancelled":j.result=result or {};j.status="completed";j.finished_at=time.time();self._save(j);self.emit("job.completed","Job completed",job_id=j.id)
    except Exception as e:
     if j.attempts:j.attempts[-1].update({"status":"failed","finished_at":time.time(),"error":str(e)[:500]})
