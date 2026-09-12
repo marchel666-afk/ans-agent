@@ -51,7 +51,17 @@ class OllamaAdapter:
         self.base_url=(base_url or os.getenv("OLLAMA_BASE_URL","http://127.0.0.1:11434")).rstrip("/")
         self.model=model or os.getenv("OLLAMA_MODEL","")
     def _model(self, requested=None):
-        return requested or self.model or "llama3.2"
+        if requested and requested not in {"local", "ollama"}:
+            return requested
+        if self.model:
+            return self.model
+        try:
+            with urllib.request.urlopen(self.base_url+"/api/tags",timeout=2) as r: data=json.load(r)
+            models=data.get("models") or []
+            if models and models[0].get("name"): return models[0]["name"]
+        except Exception:
+            pass
+        return "llama3.2"
     def complete(self,prompt,**kwargs):
         model=self._model(kwargs.get("model"))
         payload=json.dumps({"model":model,"messages":[{"role":"user","content":prompt}],"stream":False}).encode()
