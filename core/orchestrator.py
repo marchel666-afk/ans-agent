@@ -74,7 +74,10 @@ class Orchestrator:
             if review.strip().upper().startswith("PASS"):
                 state.completed.append(step); state.plan.pop(0); self.emit("step.passed",step)
             elif mode=="agent":
-                break
+                repair=self.call("fixer",f"Task: {task}\nStep: {step}\nReview failure:\n{review}\nExecutor report:\n{output}\nFix the issue and return a concise repair plan.",tools=False)
+                self.emit("repair.requested",repair,step=step)
+                state.plan.insert(0,step)
+                if state.iteration>=state.max_iterations: break
             else:
                 state.plan.append(state.plan.pop(0))
         state.status="completed" if not state.plan else "max_iterations"
