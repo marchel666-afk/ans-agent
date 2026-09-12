@@ -17,6 +17,28 @@ class ModelRouter:
  def _persist(self,m):
   s=self.stats[m.model]
   with sqlite3.connect(self.db) as c: c.execute("INSERT INTO model_stats(model,ok,fail,latency) VALUES(?,?,?,?) ON CONFLICT(model) DO UPDATE SET ok=excluded.ok,fail=excluded.fail,latency=excluded.latency",(m.model,s["ok"],s["fail"],s["latency"]))
+ def discover_openrouter(self, limit=100):
+  import json, urllib.request
+  key=os.getenv("OPENROUTER_API_KEY")
+  if not key: return {"ok":False,"reason":"OPENROUTER_API_KEY missing","added":0}
+  req=urllib.request.Request("https://openrouter.ai/api/v1/models",headers={"Authorization":"Bearer "+key})
+  with urllib.request.urlopen(req,timeout=15) as r: data=json.loads(r.read().decode())
+  added=0
+  existing={(m.provider,m.model) for m in self.registry.models}
+  for x in data.get("data",[])[:limit]:
+   slug=x.get("id","")
+   if not slug: continue
+   pricing=x.get("pricing") or {}
+   is_free=(pricing.get("prompt") in (0,"0","0.0") and pricing.get("completion") in (0,"0","0.0")) or slug.endswith(":free")
+   params=set(x.get("supported_parameters") or [])
+   tools="tools" in params
+   roles={"researcher","planner","reviewer"} if tools else {"researcher"}
+   if any(k in slug.lower() for k in ("code","coder","qwen","devstral","codestral")): roles.add("executor")
+   if is_free: priority=60
+   else: priority=90
+   if ("openrouter",slug) not in existing:
+    self.registry.models.append(ModelCandidate("openrouter",slug,roles,free=is_free,tool_capable=tools,priority=priority)); added+=1
+  return {"ok":True,"added":added,"total":len(self.registry.models)}
  def refresh_free_pool(self):
   if os.getenv("OPENROUTER_API_KEY"):
    for m in self.registry.models:
