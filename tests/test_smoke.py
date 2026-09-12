@@ -17,3 +17,18 @@ def test_job_lifecycle():
         if jm.get(j.id).status=="completed": break
         time.sleep(.05)
     assert jm.get(j.id).status=="completed"; assert done==[1]
+
+
+def test_cancelled_job_does_not_complete():
+    import time
+    from core.jobs import JobManager
+    jm=JobManager();
+    def work(job):
+        while not job.cancel_requested: time.sleep(.01)
+        return {"should":"not complete"}
+    j=jm.submit("s1",work)
+    time.sleep(.03); assert jm.cancel(j.id)
+    for _ in range(30):
+        if jm.get(j.id).status=="cancelled": break
+        time.sleep(.02)
+    assert jm.get(j.id).status=="cancelled"
