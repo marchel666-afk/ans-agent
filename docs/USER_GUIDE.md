@@ -35,6 +35,7 @@ Create or edit `.env`:
     GITHUB_BASE_BRANCH=main
     ANS_WORKSPACE=./workspace
     ANS_DB=./data/ans.db
+    ANS_AUTH_TOKEN_FILE=./data/auth.token
 
 Do not put your Claude Code subscription password or session token into `.env`.
 
