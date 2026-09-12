@@ -10,16 +10,27 @@ class ApprovalManager:
  def request(self,sid,name,args):
   level=self.classify(name,args)
   if level=="safe":return True
+  key=(sid,name,repr(sorted(args.items())))
   with self.cv:
-   key=(sid,name,repr(sorted(args.items())))
    if self.approved.pop(key,False): return True
    self.pending[sid]={"tool":name,"args":args,"level":level,"key":key}
    self.emit("approval.required",f"Approval required for {name}",tool=name,args=args,level=level)
    return False
+ def wait_for(self,sid,name,args,timeout=1800):
+  key=(sid,name,repr(sorted(args.items())))
+  with self.cv:
+   end=__import__("time").time()+timeout
+   while not self.approved.pop(key,False):
+    remaining=end-__import__("time").time()
+    if remaining<=0:
+     self.pending.pop(sid,None); self.emit("approval.timeout",name,tool=name); return False
+    self.cv.wait(remaining)
+   self.pending.pop(sid,None); return True
  def decide(self,sid,allow):
   with self.cv:
-   item=self.pending.pop(sid,None)
+   item=self.pending.get(sid)
    if item and allow:self.approved[item["key"]]=True
+   if item and not allow:self.pending.pop(sid,None)
    if item:self.emit("approval."+("granted" if allow else "denied"),item["tool"],tool=item["tool"])
    self.cv.notify_all()
   return item if allow else None
