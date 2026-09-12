@@ -32,7 +32,7 @@ class OpenAICompatibleAdapter:
         key=os.getenv(self.api_key_env)
         if not key: raise ProviderError(f"Missing {self.api_key_env}")
         payload=json.dumps({"model":self.model,"messages":[{"role":"user","content":prompt}],"temperature":kwargs.get("temperature",0.2)}).encode()
-        req=urllib.request.Request(self.base_url+"/chat/completions",data=payload,headers={"Authorization":"Bearer "+key,"Content-Type":"application/json"})
+        req=urllib.request.Request(self.base_url+"/chat/completions",data=payload,headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
         try:
             with urllib.request.urlopen(req,timeout=kwargs.get("timeout",120)) as r: data=json.load(r)
         except Exception as e: raise ProviderError(f"{self.name}: {e}") from e
