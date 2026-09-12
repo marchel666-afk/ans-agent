@@ -8,7 +8,7 @@ from core.git import GitWorkspace
 from core.best_of_n import BestOfN
 from core.events import EventBus
 from core.tools import Workspace
-from core.approval import ApprovalManager
+from core.approval import ApprovalManager\nfrom core.memory import ProjectMemory
 import asyncio, os
 app=FastAPI(title="ANS Agent"); router=ModelRouter(); sessions=SessionStore(); events=EventBus(); approvals=ApprovalManager(); WORKSPACE=os.getenv("ANS_WORKSPACE","./workspace")
 class RouteRequest(BaseModel): role:str; requires_tools:bool=False; prefer_free:bool=False
@@ -23,7 +23,7 @@ def models():
 def route(req:RouteRequest): return router.choose(req.role,requires_tools=req.requires_tools,prefer_free=req.prefer_free).__dict__
 @app.get("/sessions")
 def list_sessions(): return [{"id":s.id,"task":s.task,"mode":s.mode,"events":len(s.events)} for s in sessions.list()]
-@app.get("/sessions/{sid}")
+@app.get("/memory")\ndef get_memory(project:str="default"):\n return {"project":project,"memory":ProjectMemory(sessions,project).get_context()}\n@app.post("/memory")\nasync def save_memory(project:str,key:str,value:str):\n ProjectMemory(sessions,project).remember(key,value); return {"ok":True}\n@app.get("/sessions/{sid}")
 def get_session(sid:str):
  s=sessions.get(sid)
  if not s: raise HTTPException(404,"session not found")
@@ -59,7 +59,7 @@ async def run(req:RunRequest):
  if not req.task.strip(): raise HTTPException(400,"task is required")
  if req.mode not in {"chat","agent","autopilot","best_of_n"}: raise HTTPException(400,"invalid mode")
  s=sessions.get(req.session_id) if req.session_id else sessions.create(req.task,req.mode)
- def emit(k,m,**d): item={"kind":k,"message":m,**d}; s.emit(k,m,**d); events.publish(s.id,item)
+ def emit(k,m,**d): item={"kind":k,"message":m,**d}; s.emit(k,m,**d); sessions.emit(s.id,k,m,**d); events.publish(s.id,item)
  emit("run.started","Task accepted",mode=req.mode)
  try:
   emit("router","Selecting models")
