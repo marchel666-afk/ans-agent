@@ -42,6 +42,8 @@ Start:
 
     python run.py
 
+Before using Autopilot, open the authenticated `/startup` diagnostics endpoint and confirm the required components are ready. If a provider shows `✗`, it is unavailable and the router will use configured fallbacks.
+
 Open `http://127.0.0.1:8080`.
 
 For the Docker deployment, use port `8000` internally and put Nginx/TLS in front of it. The first protected request asks for the generated ANS token. On Windows it is `data\\auth.token`; on Linux/macOS it is `data/auth.token`.
