@@ -130,12 +130,15 @@ async def run(req:RunRequest,_:None=Depends(auth)):
     emit("run.started","Task accepted",mode=req.mode)
     try:
         orch=Orchestrator(router,WORKSPACE,emit=emit,approval=approvals,session_id=s.id)
-        async def worker():
-            if req.mode=="best_of_n": result=await asyncio.to_thread(BestOfN(orch).run,req.task)
-            else: result=await asyncio.to_thread(orch.run,req.task,req.mode,max(1,min(req.max_iterations,30)))
+        def worker(job):
+            if job.cancel_requested: return {"status":"cancelled"}
+            if req.mode=="best_of_n": result=BestOfN(orch).run(req.task)
+            else: result=orch.run(req.task,req.mode,max(1,min(req.max_iterations,30)))
             emit("run.completed","Run completed",status=result.get("status","completed"))
-        asyncio.create_task(worker())
-        return {"session_id":s.id,"status":"running"}
+            return result
+        job=jobs.submit(s.id,worker)
+        emit("job.created","Agent job queued",job_id=job.id)
+        return {"session_id":s.id,"job_id":job.id,"status":job.status}
     except Exception as e:
         emit("run.failed",str(e)); raise HTTPException(500,str(e))
 
