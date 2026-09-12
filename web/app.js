@@ -16,3 +16,7 @@ load();loadFiles();loadGit();loadDiff();
 
 async function pollJob(){if(!currentJob)return;try{const x=await(await api('/jobs/'+currentJob)).json();$('runstatus').textContent=(x.status||'unknown').toUpperCase();if(['queued','running','waiting'].includes(x.status)){setTimeout(pollJob,1000)}}catch(e){}}
 async function cancelJob(){if(currentJob)await api('/jobs/'+currentJob+'/cancel',{method:'POST'});}
+
+function openSetup(){$('setupModal').classList.remove('hidden');runDiagnostics()}
+function closeSetup(){$('setupModal').classList.add('hidden')}
+async function runDiagnostics(){const el=$('setupChecks');el.textContent='Checking…';try{const d=await(await api('/diagnostics')).json();el.innerHTML=Object.entries(d.checks||{}).map(([k,v])=>'<div class="setup-row"><b>'+k+'</b><span class="'+(v?'ok':'error')+'">'+(v?'READY':'CONFIGURE')+'</span></div>').join('')+(d.ok?'<p class="ok">Core runtime ready.</p>':'<p class="error">Claude Code, workspace or persistence is not ready.</p>')}catch(e){el.textContent='Authentication required or server unavailable.'}}
