@@ -14,6 +14,7 @@ class ToolLoop:
     self.emit("approval.waiting",f"Waiting for approval: {name}",tool=name,args=args)
     if hasattr(self.executor,"job") and self.executor.job: self.executor.job.status="waiting"
     if not self.approval.wait_for(self.session_id,name,args): return "APPROVAL_DENIED_OR_TIMEOUT: "+name
+    if hasattr(self.executor,"job") and self.executor.job: self.executor.job.status="running"
    self.emit("tool.call",name,args=args)
    try: result=self.executor.execute(name,args)
    except Exception as e: result={"ok":False,"error":str(e)}
