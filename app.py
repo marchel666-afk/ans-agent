@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse\nfrom fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from core.router import ModelRouter
 from core.orchestrator import Orchestrator
@@ -14,7 +14,7 @@ from core.github import GitHubService
 from core.security import get_token
 import asyncio, os
 
-app=FastAPI(title="ANS Agent")
+app=FastAPI(title="ANS Agent")\napp.mount("/web", StaticFiles(directory="web"), name="web")
 router=ModelRouter(); sessions=SessionStore(); events=EventBus(); approvals=ApprovalManager()
 github=GitHubService(); WORKSPACE=os.path.abspath(os.getenv("ANS_WORKSPACE","./workspace")); AUTH_TOKEN=get_token()
 
