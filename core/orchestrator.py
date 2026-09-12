@@ -30,8 +30,10 @@ class Orchestrator:
             if not adapter:
                 errors.append(f"{m.provider}: adapter unavailable"); continue
             try:
+                started=__import__("time").time()
                 result=adapter.complete(prompt,timeout=120)
                 self.router.report_success(m)
+                self.router.report_latency(m,__import__("time").time()-started,True)
                 return result.text
             except ProviderError as e:
                 self.router.report_failure(m); errors.append(str(e))
