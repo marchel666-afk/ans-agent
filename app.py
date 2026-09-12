@@ -46,6 +46,23 @@ def guarded_path(path:str):
     Workspace(WORKSPACE)._path(path)
     return path
 
+@app.get("/startup")
+def startup(_:None=Depends(auth)):
+    o=Orchestrator(router,WORKSPACE)
+    a=o.adapters
+    checks={
+      "api":True,
+      "workspace":os.path.isdir(WORKSPACE),
+      "git":os.path.isdir(os.path.join(WORKSPACE,".git")),
+      "claude_code":bool(a.get("claude-code")),
+      "openai":bool(a.get("openai")),
+      "gemini":bool(a.get("gemini")),
+      "openrouter":bool(a.get("openrouter")),
+      "github":github.enabled(),
+      "jobs":os.path.exists(jobs.db_path),
+    }
+    return {"ready":checks["workspace"] and checks["jobs"] and checks["claude_code"],"checks":checks}
+
 @app.get("/health")
 def health():
     return {"status":"ok","service":"ans-agent","workspace":os.path.isdir(WORKSPACE),"github":github.enabled(),"jobs":"sqlite"}
