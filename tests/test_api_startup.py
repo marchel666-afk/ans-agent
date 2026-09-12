@@ -50,6 +50,7 @@ def test_run_job_lifecycle_with_mock_orchestrator(monkeypatch):
     s=client.get('/sessions/'+data["session_id"],headers=h).json()
     kinds=[e["kind"] for e in s["events"]]
     assert "run.started" in kinds and "job.created" in kinds and "run.completed" in kinds
+    assert kinds.count("job.created") == 1
 
 
 def test_websocket_replays_session_events(monkeypatch):
