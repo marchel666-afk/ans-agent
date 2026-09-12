@@ -31,6 +31,8 @@ class JobManager:
    return False
  def set_waiting(self,j):
   j.status="waiting";self._save(j);self.emit("job.waiting","Job waiting for approval",job_id=j.id)
+ def set_running(self,j):
+  j.status="running";self._save(j);self.emit("job.running","Job resumed",job_id=j.id)
  def _loop(self):
   while True:
    with self.cv:
