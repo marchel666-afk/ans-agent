@@ -26,12 +26,12 @@ class ClaudeCodeAdapter:
         return ProviderResponse(p.stdout.strip())
 
 class OpenAICompatibleAdapter:
-    def __init__(self,name,base_url,api_key_env,model):
+    def __init__(self,name,base_url,api_key_env,model=None):
         self.name=name; self.base_url=base_url.rstrip("/"); self.api_key_env=api_key_env; self.model=model
     def complete(self,prompt,**kwargs):
         key=os.getenv(self.api_key_env)
         if not key: raise ProviderError(f"Missing {self.api_key_env}")
-        payload=json.dumps({"model":self.model,"messages":[{"role":"user","content":prompt}],"temperature":kwargs.get("temperature",0.2)}).encode()
+        payload=json.dumps({"model":kwargs.get("model",self.model),"messages":[{"role":"user","content":prompt}],"temperature":kwargs.get("temperature",0.2)}).encode()
         req=urllib.request.Request(self.base_url+"/chat/completions",data=payload,headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
         try:
             with urllib.request.urlopen(req,timeout=kwargs.get("timeout",120)) as r: data=json.load(r)
