@@ -69,6 +69,7 @@ def startup(_:None=Depends(auth)):
       "openai":bool(a.get("openai")),
       "gemini":bool(a.get("gemini")),
       "openrouter":bool(a.get("openrouter")),
+      "ollama":bool(a.get("ollama")),
       "github":github.enabled(),
       "jobs":os.path.exists(jobs.db_path),
     }
@@ -81,7 +82,7 @@ def health():
 @app.get("/diagnostics")
 def diagnostics(_:None=Depends(auth)):
     adapters=Orchestrator(router,WORKSPACE).adapters
-    checks={"workspace":os.path.isdir(WORKSPACE),"claude_code":bool(adapters.get("claude-code")),"openai":bool(adapters.get("openai")),"gemini":bool(adapters.get("gemini")),"openrouter":bool(adapters.get("openrouter")),"github":github.enabled(),"job_persistence":os.path.exists(jobs.db_path)}
+    checks={"workspace":os.path.isdir(WORKSPACE),"claude_code":bool(adapters.get("claude-code")),"openai":bool(adapters.get("openai")),"gemini":bool(adapters.get("gemini")),"openrouter":bool(adapters.get("openrouter")),"ollama":bool(adapters.get("ollama")),"github":github.enabled(),"job_persistence":os.path.exists(jobs.db_path)}
     return {"ok":checks["workspace"] and checks["claude_code"] and checks["job_persistence"],"checks":checks}
 
 @app.get("/profiles")
