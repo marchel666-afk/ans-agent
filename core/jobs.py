@@ -2,7 +2,7 @@ import json,sqlite3,threading,time,uuid
 from dataclasses import dataclass,field
 @dataclass
 class Job:
- id:str=field(default_factory=lambda:str(uuid.uuid4())); session_id:str=""; status:str="queued"; created_at:float=field(default_factory=time.time); started_at:float|None=None; finished_at:float|None=None; result:dict=field(default_factory=dict); error:str|None=None; cancel_requested:bool=False
+ id:str=field(default_factory=lambda:str(uuid.uuid4())); session_id:str=""; status:str="queued"; created_at:float=field(default_factory=time.time); started_at:float|None=None; finished_at:float|None=None; result:dict=field(default_factory=dict); error:str|None=None; cancel_requested:bool=False; timeout_seconds:int=3600
 class JobManager:
  def record_tool(self,name,args):
   self.emit("tool.usage",name,tool=name)
@@ -13,8 +13,8 @@ class JobManager:
  def _init_db(self):
   import os;os.makedirs(os.path.dirname(self.db_path) or ".",exist_ok=True)
   with self._db() as c:c.execute("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,session_id TEXT,status TEXT,created REAL,started REAL,finished REAL,result TEXT,error TEXT,cancel INTEGER)")
- def submit(self,session_id,fn):
-  j=Job(session_id=session_id)
+ def submit(self,session_id,fn,timeout_seconds=3600):
+  j=Job(session_id=session_id,timeout_seconds=max(1,int(timeout_seconds)))
   with self._db() as c:c.execute("INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?)",(j.id,j.session_id,j.status,j.created_at,None,None,"",None,0))
   with self.cv:self.jobs[j.id]=j;self.q.append((j.id,fn));self.cv.notify()
   self.emit("job.created","Job queued",job_id=j.id);return j
@@ -44,6 +44,8 @@ class JobManager:
    j.status="running";j.started_at=time.time();self._save(j);self.emit("job.started","Job started",job_id=j.id)
    try:
     result=fn(j)
+    if time.time()-j.started_at > j.timeout_seconds:
+     raise TimeoutError(f"Job exceeded timeout of {j.timeout_seconds}s")
     if j.cancel_requested: j.status="cancelled"; j.finished_at=time.time(); self._save(j); self.emit("job.cancelled","Job cancelled",job_id=j.id)
     elif j.status!="cancelled":j.result=result or {};j.status="completed";j.finished_at=time.time();self._save(j);self.emit("job.completed","Job completed",job_id=j.id)
    except Exception as e:
