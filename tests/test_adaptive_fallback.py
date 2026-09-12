@@ -43,3 +43,20 @@ def test_failure_path_selects_fallback_after_opening_circuit():
   assert xs and xs[0].model=="o"
   rt.report_success(o)
   assert rt.circuit_view()["a"]["state"]=="open"
+
+
+def test_orchestrator_call_retries_on_fallback(monkeypatch):
+ from core.orchestrator import Orchestrator
+ class A:
+  def __init__(self,name): self.name=name
+  def complete(self,*args,**kwargs):
+   if self.name=="a": raise RuntimeError("weekly limit")
+   return type("R",(),{"text":"OK"})()
+ a=ModelCandidate("anthropic","a",{"planner"},priority=1)
+ o=ModelCandidate("ollama","o",{"planner"},priority=2)
+ rt=ModelRouter(ModelRegistry([a,o]))
+ rt._available=lambda m: True
+ orch=Orchestrator(router=rt)
+ orch.adapters={"a":A("a"),"o":A("o")}
+ assert orch.call("planner","smoke")=="OK"
+ assert rt.circuit_view()["a"]["state"]=="open"
