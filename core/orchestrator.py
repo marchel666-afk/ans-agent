@@ -20,15 +20,15 @@ class Orchestrator:
         self.session_id=session_id
         self.memory=None
 
-    def call(self,role,prompt,prefer_free=False,tools=False):
+    def call(self,role,prompt,prefer_free=False,tools=False,policy="balanced",budget=None):
         profile=getattr(self,"profile",None)
         if profile:
             mapped={"planner":profile.planner,"architect":profile.planner,"reviewer":profile.reviewer,"researcher":profile.researcher,"judge":profile.judge}
             preferred=mapped.get(role)
-            candidates=self.router.rank(role,requires_tools=tools,prefer_free=prefer_free)
+            candidates=self.router.policy_rank(role,policy,requires_tools=tools,budget=budget)
             if preferred: candidates=sorted(candidates,key=lambda m: 0 if m.model==preferred or m.provider==preferred else 1)
         else:
-            candidates=self.router.rank(role,requires_tools=tools,prefer_free=prefer_free)
+            candidates=self.router.policy_rank(role,policy,requires_tools=tools,budget=budget)
         errors=[]
         for m in candidates:
             adapter=self.adapters.get(m.model) or self.adapters.get(m.provider)
@@ -52,8 +52,10 @@ class Orchestrator:
                 self.emit("provider.failed",error,provider=m.provider,model=m.model,role=role,category=failure["category"],cooldown_seconds=failure["cooldown_seconds"])
         raise ProviderError("No available provider: "+"; ".join(errors))
 
-    def run(self,task,mode="agent",max_iterations=30):
+    def run(self,task,mode="agent",max_iterations=30,policy="balanced",budget=None):
         original_task=task
+        self.policy=policy
+        self.budget=budget
         state=AgentState(task=task,mode=TaskMode(mode),max_iterations=max_iterations)
         if self.memory:
             context=self.memory.get_context()
@@ -71,7 +73,9 @@ class Orchestrator:
             step=state.plan[0]; state.iteration+=1
             self.emit("step.started",step,iteration=state.iteration)
             try:
-                candidates=self.router.rank("executor",requires_tools=True)
+                policy=getattr(self,"policy","balanced")
+                budget=getattr(self,"budget",None)
+                candidates=self.router.policy_rank("executor",policy,requires_tools=True,budget=budget)
                 if not candidates: raise ProviderError("No executor model available")
                 executor=ToolExecutor(self.workspace)
                 job=getattr(self,"job",None)
