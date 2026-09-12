@@ -17,5 +17,5 @@ class ModelRegistry:
         r.register(ModelCandidate("openai", "gpt", {"planner", "architect", "reviewer", "judge"}, priority=5))
         r.register(ModelCandidate("google", "gemini", {"researcher", "planner", "reviewer"}, priority=10))
         r.register(ModelCandidate("openrouter", "openrouter/free", {"researcher", "reviewer", "planner"}, free=True, priority=50))
-        r.register(ModelCandidate("ollama", "local", {"researcher", "planner", "reviewer"}, free=True, priority=80))
+        r.register(ModelCandidate("ollama", "local", {"researcher", "planner", "architect", "reviewer", "judge", "executor", "tester", "fixer"}, free=True, tool_capable=True, priority=80))
         return r
