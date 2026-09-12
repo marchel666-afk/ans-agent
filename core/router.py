@@ -128,8 +128,9 @@ class ModelRouter:
    return "timeout",120
   return "provider_error",30
 
- def fallback_policy(self,category,role,policy="balanced"):
-  base=self.policy_rank(role,policy)
+ def fallback_policy(self,category,role,policy="balanced",exclude=None):
+  excluded=set(exclude or ())
+  base=[m for m in self.policy_rank(role,policy) if m.model not in excluded]
   if category in {"auth","weekly_limit"}:
    return [m for m in base if m.provider != "anthropic"] or base
   if category in {"rate_limit","timeout"}:
