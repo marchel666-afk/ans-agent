@@ -101,6 +101,12 @@ def task_graph(sid:str,_:None=Depends(auth)):
     if not s: raise HTTPException(404,"session not found")
     return {"session_id":sid,"events":[e for e in s.events if e.get("kind")=="task.graph"]}
 
+@app.get("/cost-estimate/{provider}/{model}")
+def cost_estimate(provider:str,model:str,input_tokens:int=4000,output_tokens:int=2000,_:None=Depends(auth)):
+    m=next((x for x in router.registry.models if x.provider==provider and x.model==model),None)
+    if not m: raise HTTPException(404,"model not found")
+    return {"provider":provider,"model":model,"estimated_cost":router.cost_estimate(m,input_tokens,output_tokens)}
+
 @app.get("/learning")
 def learning(role:str|None=None,_:None=Depends(auth)): return router.learning_view(role)
 
