@@ -30,3 +30,16 @@ def test_circuit_opens_after_failure_and_recovers():
   assert rt.circuit_view()["m"]["state"]=="half-open"
   rt.report_success(m)
   assert rt.circuit_view()["m"]["state"]=="closed"
+
+
+def test_failure_path_selects_fallback_after_opening_circuit():
+ with tempfile.TemporaryDirectory() as d:
+  a=ModelCandidate("anthropic","a",{"planner"},priority=1)
+  o=ModelCandidate("ollama","o",{"planner"},priority=2)
+  rt=ModelRouter(ModelRegistry([a,o])); rt.db=d+"/r.db"
+  rt.report_failure(a,error="weekly limit")
+  assert rt.circuit_view()["a"]["state"]=="open"
+  xs=rt.fallback_policy("weekly_limit","planner",exclude={"a"})
+  assert xs and xs[0].model=="o"
+  rt.report_success(o)
+  assert rt.circuit_view()["a"]["state"]=="open"
