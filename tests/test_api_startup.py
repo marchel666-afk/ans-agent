@@ -50,3 +50,15 @@ def test_run_job_lifecycle_with_mock_orchestrator(monkeypatch):
     s=client.get('/sessions/'+data["session_id"],headers=h).json()
     kinds=[e["kind"] for e in s["events"]]
     assert "run.started" in kinds and "job.created" in kinds and "run.completed" in kinds
+
+
+def test_websocket_replays_session_events(monkeypatch):
+    monkeypatch.setattr(app,'AUTH_TOKEN','test-token')
+    sid="ws-smoke"
+    s=app.sessions.create("ws test","agent")
+    s.id=sid
+    s.events=[{"kind":"run.started","message":"started"},{"kind":"run.completed","message":"done"}]
+    app.sessions.sessions[sid]=s
+    with client.websocket_connect("/ws/"+sid+"?token=test-token") as ws:
+        assert ws.receive_json()["kind"]=="run.started"
+        assert ws.receive_json()["kind"]=="run.completed"
