@@ -2,6 +2,9 @@ import re, threading
 SAFE={"read_file","list_files","git_status","git_diff"}
 DANGEROUS_RE=re.compile(r"(^|[;&|])(rm|rmdir|del|format|sudo|shutdown|reboot|mkfs)\b|\b(git push|git reset --hard|docker rm|kubectl delete)\b",re.I)
 class ApprovalManager:
+ def requires_confirmation(self,name,args,autonomous=False):
+  level=self.classify(name,args)
+  return level=="dangerous" or (level=="moderate" and not autonomous)
  def __init__(self,emit=None): self.pending={}; self.approved={}; self.emit=emit or (lambda *a,**k:None); self.cv=threading.Condition()
  def classify(self,name,args):
   if name in SAFE:return "safe"
