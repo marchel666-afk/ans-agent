@@ -18,7 +18,7 @@ class ClaudeCodeAdapter:
     name="anthropic/claude-code"
     def complete(self,prompt,**kwargs):
         cmd=["claude","-p",prompt]
-        if kwargs.get("model"): cmd.extend(["--model", str(kwargs["model"])])
+        if kwargs.get("model") and kwargs["model"] not in {"claude-code", "default", "claude"}: cmd.extend(["--model", str(kwargs["model"])])
         try:
             p=subprocess.run(cmd,cwd=kwargs.get("cwd"),text=True,capture_output=True,timeout=kwargs.get("timeout",180))
         except FileNotFoundError as e:
