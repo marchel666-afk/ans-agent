@@ -70,7 +70,7 @@ class ModelRouter:
    free=[m for m in cs if m.free]
    if free: cs=free
   now=time.time()
-  return sorted([m for m in cs if self._available(m) and (max_cost is None or m.input_cost_per_million+m.output_cost_per_million<=max_cost)],key=lambda m:(self.failures.get(m.model,(0,0))[1]>now,self.score(m,role),self.failures.get(m.model,(0,0))[0]))
+  return sorted([m for m in cs if self._available(m) and (max_cost is None or m.input_cost_per_million+m.output_cost_per_million<=max_cost)],key=lambda m:(self.failures.get(m.model,(0,0,""))[1]>now,self.score(m,role),self.failures.get(m.model,(0,0,""))[0]))
  def choose(self,role,*,requires_tools=False,prefer_free=False,max_cost=None):
   cs=self.rank(role,requires_tools,prefer_free,max_cost)
   if not cs: raise RuntimeError(f"No model available for role={role!r}")
@@ -98,7 +98,7 @@ class ModelRouter:
   return "provider_error",30
 
  def report_failure(self,m,backoff=30,error=None):
-  n,_=self.failures.get(m.model,(0,0))
+  n,*_=self.failures.get(m.model,(0,0))
   category,base=self.classify_failure(error or "")
   if error is not None: backoff=base
   cooldown=min(900,backoff*(2**n))
