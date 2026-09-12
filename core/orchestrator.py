@@ -35,13 +35,17 @@ class Orchestrator:
             if not adapter:
                 errors.append(f"{m.provider}: adapter unavailable"); continue
             try:
+                self.emit("provider.selected",m.provider+"/"+m.model,role=role)
                 started=__import__("time").time()
                 result=adapter.complete(prompt,timeout=120,model=m.model,cwd=self.workspace)
                 self.router.report_success(m)
                 self.router.report_latency(m,__import__("time").time()-started,True)
                 return result.text
             except Exception as e:
-                self.router.report_failure(m); errors.append(f"{m.provider}: {str(e)[:180]}")
+                self.router.report_failure(m)
+                error=str(e)[:180]
+                errors.append(f"{m.provider}: {error}")
+                self.emit("provider.failed",error,provider=m.provider,model=m.model,role=role)
         raise ProviderError("No available provider: "+"; ".join(errors))
 
     def run(self,task,mode="agent",max_iterations=30):
@@ -77,6 +81,7 @@ class Orchestrator:
                         errors.append(f"{m.provider}: adapter unavailable")
                         continue
                     try:
+                        self.emit("provider.selected",m.provider+"/"+m.model,role="executor",step=step)
                         loop=ToolLoop(adapter,executor,emit=self.emit,
                                       approval=self.approval,session_id=self.session_id)
                         output=loop.run(f"TASK: {task}\nSTEP: {step}\nInspect the workspace and implement this step. Verify your changes.",max_steps=20)
@@ -84,7 +89,9 @@ class Orchestrator:
                         break
                     except Exception as e:
                         self.router.report_failure(m)
-                        errors.append(f"{m.provider}: {str(e)[:180]}")
+                        error=str(e)[:180]
+                        errors.append(f"{m.provider}: {error}")
+                        self.emit("provider.failed",error,provider=m.provider,model=m.model,role="executor",step=step)
                 if output is None:
                     raise ProviderError("All executor providers failed: "+"; ".join(errors))
             except Exception as e:
