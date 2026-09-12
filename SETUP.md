@@ -59,6 +59,8 @@ Set `GITHUB_TOKEN` and `GITHUB_REPO`. Grant only the repository permissions need
 
 ## 7. VPS / Docker
 
+**Claude Code note:** the Docker image runs ANS, but your Claude Code Pro login is a user-level CLI authentication. For the simplest setup that uses your Pro subscription, run ANS natively on the VPS where `claude` is installed and authenticated. The Docker image is suitable when the executor is provided through an API/gateway or when Claude Code is separately installed and authenticated inside the container.
+
 ```bash
 git clone https://github.com/marchel666-afk/ans-agent.git
 cd ans-agent
