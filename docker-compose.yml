@@ -8,5 +8,6 @@ services:
     volumes:
       - ./workspace:/workspace
       - ./config:/app/config:ro
+      - ./data:/app/data
     working_dir: /app
     restart: unless-stopped
