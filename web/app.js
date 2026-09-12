@@ -2,7 +2,48 @@ const $=id=>document.getElementById(id),timeline=$('timeline');
 let socket=null,currentSession=null,currentJob=null,token=localStorage.getItem('ans_token')||'';
 const authHeaders=()=>token?{'Authorization':'Bearer '+token}:{};
 function add(kind,msg){if(timeline.querySelector('.empty'))timeline.innerHTML='';const d=document.createElement('div');const b=document.createElement('b');b.textContent=kind;const s=document.createElement('span');s.textContent=' '+msg;d.append(b,s);if(kind==='provider.selected'){d.className='event-provider-selected';if(typeof msg==='string'&&msg.includes('/')){const meta=document.createElement('small');meta.textContent='  score='+((arguments[3]?.score)??'—');d.appendChild(meta)}}if(kind==='provider.failed')d.className='event-provider-failed';timeline.appendChild(d);timeline.scrollTop=timeline.scrollHeight}
-function connect(sid){if(socket)socket.close();socket=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws/'+sid+'?token='+encodeURIComponent(token));socket.onmessage=e=>{const x=JSON.parse(e.data);add(x.kind||'EVENT',x.message||'');if(x.kind==='provider.selected'){const p=x.provider||x.message;add('ROUTING',p+' · policy='+(x.policy||'balanced')+' · score='+(x.score??'—')+' · cost=if(x.kind==='approval.required'){currentSession=sid;$('approval').classList.remove('hidden');$('approvalText').textContent=x.tool+': '+JSON.stringify(x.args||{})}if(x.kind==='run.completed'){$('runstatus').textContent=(x.status||'completed').toUpperCase();load();loadFiles();loadGit();loadDiff()}}}
+function renderTrace(x){
+  const box=$('taskGraph'); if(!box) return;
+  const kind=x.kind||'event', provider=x.provider||x.message||'';
+  let cls='trace-node';
+  if(kind==='provider.failed') cls+=' failed';
+  if(kind==='run.completed') cls+=' success';
+  const node=document.createElement('div'); node.className=cls;
+  const title=document.createElement('div'); title.className='trace-title';
+  title.textContent=kind.replaceAll('.',' / ').toUpperCase();
+  const meta=document.createElement('div'); meta.className='trace-meta';
+  if(kind==='provider.selected'){
+    meta.textContent=provider+' · role='+(x.role||'—')+' · score='+(x.score??'—')+' · $'+(x.estimated_cost??'—')+' · '+(x.policy||'balanced');
+  }else if(kind==='provider.failed'){
+    meta.textContent=(provider||'provider')+' → '+(x.category||x.error||'error')+' · cooldown='+(x.cooldown_seconds||0)+'s';
+  }else{
+    meta.textContent=x.message||x.status||'';
+  }
+  node.append(title,meta); box.appendChild(node); box.scrollTop=box.scrollHeight;
+}
+function connect(sid){
+  if(socket)socket.close();
+  const proto=location.protocol==='https:'?'wss://':'ws://';
+  socket=new WebSocket(proto+location.host+'/ws/'+sid+'?token='+encodeURIComponent(token));
+  socket.onmessage=e=>{
+    const x=JSON.parse(e.data);
+    add(x.kind||'EVENT',x.message||'');
+    if(['provider.selected','provider.failed','run.completed','run.started'].includes(x.kind)) renderTrace(x);
+    if(x.kind==='provider.selected'){
+      add('ROUTING',(x.provider||x.message)+' · policy='+(x.policy||'balanced')+' · score='+(x.score??'—')+' · cost=$'+(x.estimated_cost??'—')+(x.budget!=null?' · budget=$'+x.budget:''));
+    }
+    if(x.kind==='provider.failed'){
+      add('FALLBACK','Failed '+(x.provider||'provider')+' → '+(x.category||'error')+' · cooldown='+(x.cooldown_seconds||0)+'s');
+    }
+    if(x.kind==='approval.required'){
+      currentSession=sid;$('approval').classList.remove('hidden');$('approvalText').textContent=x.tool+': '+JSON.stringify(x.args||{});
+    }
+    if(x.kind==='run.completed'){
+      $('runstatus').textContent=(x.status||'completed').toUpperCase();
+      load();loadFiles();loadGit();loadDiff();
+    }
+  };
+}
 async function api(url,opts={}){opts.headers={...(opts.headers||{}),...authHeaders()};const r=await fetch(url,opts);if(r.status===401){token=prompt('Enter ANS auth token');if(token){localStorage.setItem('ans_token',token);opts.headers=authHeaders();return fetch(url,opts)}}return r}
 async function load(){try{const h=await fetch('/health');$('health').textContent=h.ok?'● ONLINE':'● OFFLINE';$('health').className='status '+(h.ok?'ok':'error')}catch(e){$('health').textContent='● OFFLINE'}try{await loadModelPool()}catch(e){}try{const d=await(await api('/diagnostics')).json(); $('health').title=Object.entries(d.checks||{}).map(([k,v])=>k+': '+(v?'READY':'MISSING')).join('\n')}catch(e){}try{const ss=await(await api('/sessions')).json();$('sessions').innerHTML=ss.slice(-8).reverse().map(s=>'<div title="'+s.id+'">'+s.task+'</div>').join('')}catch(e){}}
 async function loadFiles(){try{const x=await(await api('/workspace/files')).json();$('files').innerHTML=x.files.map(f=>'<div class="file" data-path="'+encodeURIComponent(f)+'">'+f+'</div>').join('');document.querySelectorAll('.file').forEach(el=>el.onclick=()=>openFile(decodeURIComponent(el.dataset.path)))}catch(e){$('files').textContent='Workspace unavailable'}}
