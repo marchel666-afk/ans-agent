@@ -10,7 +10,7 @@ class ModelRouter:
  def __init__(self,registry=None):
   self.registry=registry or ModelRegistry.default(); self.failures={}
   self.db=os.getenv("ANS_ROUTER_DB","./data/router_stats.db"); os.makedirs(os.path.dirname(self.db) or ".",exist_ok=True)
-  self.stats={}; self.benchmarks={}
+  self.stats={}; self.benchmarks={}; self.health_db_ready=False
   with sqlite3.connect(self.db) as c:
    c.execute("CREATE TABLE IF NOT EXISTS model_stats(model TEXT PRIMARY KEY, ok INTEGER DEFAULT 0, fail INTEGER DEFAULT 0, latency REAL DEFAULT 0)")
    for model,ok,fail,lat in c.execute("SELECT model,ok,fail,latency FROM model_stats"): self.stats[model]={"ok":ok,"fail":fail,"latency":lat}
