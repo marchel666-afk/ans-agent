@@ -36,7 +36,7 @@ class Orchestrator:
                 errors.append(f"{m.provider}: adapter unavailable"); continue
             try:
                 started=__import__("time").time()
-                result=adapter.complete(prompt,timeout=120,model=m.model)
+                result=adapter.complete(prompt,timeout=120,model=m.model,cwd=self.workspace)
                 self.router.report_success(m)
                 self.router.report_latency(m,__import__("time").time()-started,True)
                 return result.text
