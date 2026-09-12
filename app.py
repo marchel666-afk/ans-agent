@@ -158,8 +158,17 @@ def update_model(provider:str,model:str,req:dict,_:None=Depends(auth)):
 
 @app.post("/model-pool/test/{provider}/{model:path}")
 def test_model(provider:str,model:str,_:None=Depends(auth)):
-    try: return router.test_model(provider,model)
-    except Exception as e: raise HTTPException(502,str(e))
+    try:
+        result=router.test_model(provider,model)
+        adapter=Orchestrator(router,WORKSPACE).adapters.get(provider)
+        if not result.get("available") or not adapter:
+            return {**result,"ok":False,"error":"provider is not available"}
+        started=__import__("time").time()
+        response=adapter.complete("Reply with exactly: OK",model=model,timeout=30,cwd=WORKSPACE)
+        return {**result,"ok":response.text.strip()!="","response":response.text.strip()[:500],
+                "latency":round(__import__("time").time()-started,3)}
+    except Exception as e:
+        return {"provider":provider,"model":model,"available":False,"ok":False,"error":str(e)[:500]}
 
 @app.post("/route")
 def route(req:RouteRequest,_:None=Depends(auth)):
