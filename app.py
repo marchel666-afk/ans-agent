@@ -68,6 +68,13 @@ def models(_:None=Depends(auth)):
             for m in router.registry.models]
 
 @app.post("/model-pool/benchmark/{provider}/{model:path}")
+def benchmark_role(provider:str,model:str,role:str="planner",_:None=Depends(auth)):
+    adapter=Orchestrator(router,WORKSPACE).adapters.get(provider)
+    if not adapter: raise HTTPException(400,"provider unavailable")
+    try: return router.role_benchmark(provider,model,adapter,role)
+    except Exception as e: raise HTTPException(502,str(e))
+
+@app.post("/model-pool/benchmark/{provider}/{model:path}")
 def benchmark_model(provider:str,model:str,_:None=Depends(auth)):
     adapter=Orchestrator(router,WORKSPACE).adapters.get(provider)
     if not adapter: raise HTTPException(400,"provider unavailable")
