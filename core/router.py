@@ -46,7 +46,17 @@ class ModelRouter:
   return self.pool()
  def _available(self,m):
   keys={"anthropic":"ANTHROPIC_API_KEY","openai":"OPENAI_API_KEY","google":"GEMINI_API_KEY","openrouter":"OPENROUTER_API_KEY"}
-  return m.provider=="ollama" or bool(os.getenv(keys.get(m.provider,""))) or (m.provider=="anthropic" and self._claude_cli_available())
+  if m.provider=="ollama":
+   try:
+    import urllib.request, json
+    base=os.getenv("OLLAMA_BASE_URL","http://127.0.0.1:11434").rstrip("/")
+    with urllib.request.urlopen(base+"/api/tags",timeout=1.5) as r: data=json.loads(r.read().decode())
+    wanted=os.getenv("OLLAMA_MODEL","").strip()
+    models=[x.get("name","") for x in data.get("models",[])]
+    return bool(models) and (not wanted or any(x==wanted or x.startswith(wanted+":") for x in models))
+   except Exception:
+    return False
+  return bool(os.getenv(keys.get(m.provider,""))) or (m.provider=="anthropic" and self._claude_cli_available())
  def _claude_cli_available(self):
   import shutil
   return shutil.which("claude") is not None
