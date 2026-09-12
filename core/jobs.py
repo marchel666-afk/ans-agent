@@ -4,6 +4,8 @@ from dataclasses import dataclass,field
 class Job:
  id:str=field(default_factory=lambda:str(uuid.uuid4())); session_id:str=""; status:str="queued"; created_at:float=field(default_factory=time.time); started_at:float|None=None; finished_at:float|None=None; result:dict=field(default_factory=dict); error:str|None=None; cancel_requested:bool=False
 class JobManager:
+ def record_tool(self,name,args):
+  self.emit("tool.usage",name,tool=name)
  def __init__(self,db_path="data/jobs.db",emit=None):
   self.db_path=db_path;self.emit=emit or (lambda *a,**k:None);self.jobs={};self.q=[];self.cv=threading.Condition();self._init_db();self.worker=threading.Thread(target=self._loop,daemon=True);self.worker.start()
  def _db(self):
