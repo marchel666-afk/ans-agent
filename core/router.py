@@ -8,7 +8,7 @@ class RouteDecision:
  reason: str
 class ModelRouter:
  def __init__(self,registry=None):
-  self.registry=registry or ModelRegistry.default(); self.failures={}
+  self.registry=registry or ModelRegistry.default(); self.failures={}; self.half_open=set()
   self.db=os.getenv("ANS_ROUTER_DB","./data/router_stats.db"); os.makedirs(os.path.dirname(self.db) or ".",exist_ok=True)
   self.stats={}; self.benchmarks={}; self.health_db_ready=False
   with sqlite3.connect(self.db) as c:
