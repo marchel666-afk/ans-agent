@@ -29,11 +29,16 @@ class GitWorkspaceManager:
         if r.returncode not in (0,): raise RuntimeError(r.stderr or r.stdout)
         return subprocess.run(["git","rev-parse","HEAD"],cwd=p,text=True,capture_output=True,check=True).stdout.strip()
 
-    def can_merge(self,branch,base="HEAD"):
+    def current_branch(self):
+        return self._run("branch","--show-current") or "main"
+
+    def can_merge(self,branch,base=None):
+        base=base or self.current_branch()
         r=subprocess.run(["git","merge-tree",base,branch],cwd=self.repo,text=True,capture_output=True)
         return {"clean":r.returncode==0,"output":r.stdout[-4000:]}
-    def merge(self,branch,base="HEAD"):
-        self._run("checkout",base)
+    def merge(self,branch,base=None):
+        base=base or self.current_branch()
+        if self.current_branch()!=base: self._run("checkout",base)
         self._run("merge","--no-ff",branch,"-m",f"Merge agent branch {branch}")
         return self._run("rev-parse","HEAD")
 
