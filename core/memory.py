@@ -13,3 +13,8 @@ class AgentMemory:
   except Exception: return {}
  def put(self,key,value):
   self.store.save_memory(self.project,key,value)
+
+ def prompt_context(self,task,limit=8):
+  return self.get_context()
+ def remember_result(self,task,result):
+  self.remember("task:"+str(abs(hash(task))),result[:8000])
