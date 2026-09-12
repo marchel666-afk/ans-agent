@@ -127,6 +127,14 @@ class ModelRouter:
    return "timeout",120
   return "provider_error",30
 
+ def fallback_policy(self,category,role,policy="balanced"):
+  base=self.policy_rank(role,policy)
+  if category in {"auth","weekly_limit"}:
+   return [m for m in base if m.provider != "anthropic"] or base
+  if category in {"rate_limit","timeout"}:
+   return sorted(base,key=lambda m:(m.provider=="anthropic",self.score(m,role)))
+  return base
+
  def report_failure(self,m,backoff=30,error=None):
   n,*_=self.failures.get(m.model,(0,0))
   category,base=self.classify_failure(error or "")
