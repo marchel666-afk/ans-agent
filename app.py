@@ -44,6 +44,8 @@ class RunRequest(BaseModel):
     session_id:str|None=None
     profile:str="developer"
     timeout_seconds:int=3600
+    policy:str="balanced"
+    budget:float|None=None
 class ApprovalRequest(BaseModel):
     allow:bool
 class BranchRequest(BaseModel): name:str
@@ -253,7 +255,7 @@ async def run(req:RunRequest,_:None=Depends(auth)):
     s=sessions.get(req.session_id) if req.session_id else sessions.create(req.task,req.mode)
     def emit(k,m,**d):
         item={"kind":k,"message":m,**d}; s.emit(k,m,**d); sessions.emit(s.id,k,m,**d); events.publish(s.id,item)
-    emit("run.started","Task accepted",mode=req.mode)
+    emit("run.started","Task accepted",mode=req.mode,policy=req.policy,budget=req.budget)
     try:
         orch=Orchestrator(router,WORKSPACE,emit=emit,approval=approvals,session_id=s.id)
         orch.memory=ProjectMemory(sessions, "default")
@@ -265,7 +267,7 @@ async def run(req:RunRequest,_:None=Depends(auth)):
             orch.job_manager=jobs
             if job.cancel_requested: return {"status":"cancelled"}
             if req.mode=="best_of_n": result=BestOfN(orch).run(req.task)
-            else: result=orch.run(req.task,req.mode,max(1,min(req.max_iterations,30)))
+            else: result=orch.run(req.task,req.mode,max(1,min(req.max_iterations,30)),policy=req.policy,budget=req.budget)
             emit("run.completed","Run completed",status=result.get("status","completed"))
             return result
         job=jobs.submit(s.id,worker,timeout_seconds=req.timeout_seconds)
