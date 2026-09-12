@@ -1,4 +1,4 @@
-import os,time
+import os,time,sqlite3
 from dataclasses import dataclass
 from .registry import ModelRegistry
 from .types import ModelCandidate
@@ -7,7 +7,16 @@ class RouteDecision:
  candidate: ModelCandidate
  reason: str
 class ModelRouter:
- def __init__(self,registry=None): self.registry=registry or ModelRegistry.default(); self.failures={}; self.stats={}
+ def __init__(self,registry=None):
+  self.registry=registry or ModelRegistry.default(); self.failures={}
+  self.db=os.getenv("ANS_ROUTER_DB","./data/router_stats.db"); os.makedirs(os.path.dirname(self.db) or ".",exist_ok=True)
+  self.stats={}
+  with sqlite3.connect(self.db) as c:
+   c.execute("CREATE TABLE IF NOT EXISTS model_stats(model TEXT PRIMARY KEY, ok INTEGER DEFAULT 0, fail INTEGER DEFAULT 0, latency REAL DEFAULT 0)")
+   for model,ok,fail,lat in c.execute("SELECT model,ok,fail,latency FROM model_stats"): self.stats[model]={"ok":ok,"fail":fail,"latency":lat}
+ def _persist(self,m):
+  s=self.stats[m.model]
+  with sqlite3.connect(self.db) as c: c.execute("INSERT INTO model_stats(model,ok,fail,latency) VALUES(?,?,?,?) ON CONFLICT(model) DO UPDATE SET ok=excluded.ok,fail=excluded.fail,latency=excluded.latency",(m.model,s["ok"],s["fail"],s["latency"]))
  def refresh_free_pool(self):
   if os.getenv("OPENROUTER_API_KEY"):
    for m in self.registry.models:
@@ -40,9 +49,9 @@ class ModelRouter:
   tool_bonus=-20 if m.tool_capable else 0
   return role_bonus + m.priority + free_bonus + tool_bonus + (1-success)*30 + latency*.25
  def report_failure(self,m,backoff=30):
-  n,_=self.failures.get(m.model,(0,0));self.failures[m.model]=(n+1,time.time()+min(900,backoff*(2**n))); s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["fail"]+=1
+  n,_=self.failures.get(m.model,(0,0));self.failures[m.model]=(n+1,time.time()+min(900,backoff*(2**n))); s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["fail"]+=1; self._persist(m)
  def report_latency(self,m,seconds,ok=True):
-  s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["latency"]=seconds if not s["latency"] else s["latency"]*.8+seconds*.2; s["ok" if ok else "fail"]+=1
+  s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["latency"]=seconds if not s["latency"] else s["latency"]*.8+seconds*.2; s["ok" if ok else "fail"]+=1; self._persist(m)
  def report_success(self,m): self.failures.pop(m.model,None)
 
  def pool(self):
