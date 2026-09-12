@@ -31,6 +31,7 @@ class RunRequest(BaseModel):
     mode:str="agent"
     max_iterations:int=30
     session_id:str|None=None
+    profile:str="developer"
 class ApprovalRequest(BaseModel):
     allow:bool
 class BranchRequest(BaseModel): name:str
@@ -160,6 +161,8 @@ async def run(req:RunRequest,_:None=Depends(auth)):
     emit("run.started","Task accepted",mode=req.mode)
     try:
         orch=Orchestrator(router,WORKSPACE,emit=emit,approval=approvals,session_id=s.id)
+        profile=profiles.get(req.profile)
+        orch.profile=profile
         def worker(job):
             if job.cancel_requested: return {"status":"cancelled"}
             if req.mode=="best_of_n": result=BestOfN(orch).run(req.task)
