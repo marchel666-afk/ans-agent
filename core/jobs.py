@@ -42,6 +42,7 @@ class JobManager:
    j.status="running";j.started_at=time.time();self._save(j);self.emit("job.started","Job started",job_id=j.id)
    try:
     result=fn(j)
-    if j.status!="cancelled":j.result=result or {};j.status="completed";j.finished_at=time.time();self._save(j);self.emit("job.completed","Job completed",job_id=j.id)
+    if j.cancel_requested: j.status="cancelled"; j.finished_at=time.time(); self._save(j); self.emit("job.cancelled","Job cancelled",job_id=j.id)
+    elif j.status!="cancelled":j.result=result or {};j.status="completed";j.finished_at=time.time();self._save(j);self.emit("job.completed","Job completed",job_id=j.id)
    except Exception as e:
     j.error=str(e);j.status="failed";j.finished_at=time.time();self._save(j);self.emit("job.failed","Job failed",job_id=j.id,error=str(e))
