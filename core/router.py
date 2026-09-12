@@ -74,13 +74,14 @@ class ModelRouter:
   for m in cs:
    state=self.failures.get(m.model)
    if state and state[1] <= now:
-    expired.append(m.model); self.failures.pop(m.model,None)
+    self.failures.pop(m.model,None); self.half_open.add(m.model)
    if self._available(m) and (max_cost is None or m.input_cost_per_million+m.output_cost_per_million<=max_cost):
     active.append(m)
   if expired:
    with sqlite3.connect(self.db) as c:
     for model in expired: c.execute("DELETE FROM provider_health WHERE model=?",(model,))
-  return sorted(active,key=lambda m:(self.failures.get(m.model,(0,0,""))[1]>now,self.score(m,role),self.failures.get(m.model,(0,0,""))[0]))
+  active=[m for m in active if m.model not in self.failures or m.model in self.half_open]
+  return sorted(active,key=lambda m:(0 if m.model in self.half_open else 1,self.score(m,role),self.failures.get(m.model,(0,0,""))[0]))
  def choose(self,role,*,requires_tools=False,prefer_free=False,max_cost=None):
   cs=self.rank(role,requires_tools,prefer_free,max_cost)
   if not cs: raise RuntimeError(f"No model available for role={role!r}")
@@ -136,6 +137,7 @@ class ModelRouter:
   return base
 
  def report_failure(self,m,backoff=30,error=None):
+  self.half_open.discard(m.model)
   n,*_=self.failures.get(m.model,(0,0))
   category,base=self.classify_failure(error or "")
   if error is not None: backoff=base
@@ -149,9 +151,24 @@ class ModelRouter:
  def report_latency(self,m,seconds,ok=True):
   s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["latency"]=seconds if not s["latency"] else s["latency"]*.8+seconds*.2; s["ok" if ok else "fail"]+=1; self._persist(m)
  def report_success(self,m):
+  recovered=m.model in self.half_open
+  self.half_open.discard(m.model)
   self.failures.pop(m.model,None); self._persist(m)
   with sqlite3.connect(self.db) as c: c.execute("DELETE FROM provider_health WHERE model=?",(m.model,))
   return {"ok":True}
+ def circuit_view(self):
+  now=time.time(); out={}
+  for m in self.registry.models:
+   state=self.failures.get(m.model)
+   if state:
+    n,until,category=state
+    out[m.model]={"state":"open","failures":n,"category":category,"cooldown_remaining":max(0,round(until-now,1))}
+   elif m.model in self.half_open:
+    out[m.model]={"state":"half-open","failures":0,"category":"","cooldown_remaining":0}
+   else:
+    out[m.model]={"state":"closed","failures":0,"category":"","cooldown_remaining":0}
+  return out
+
  def stats_view(self):
   return {k:{**v,"success_rate":round(v["ok"]/(v["ok"]+v["fail"]),3) if v["ok"]+v["fail"] else 0} for k,v in self.stats.items()}
 
