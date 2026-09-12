@@ -24,3 +24,8 @@ def test_task_graph_dependencies():
 def test_pricing():
     m=ModelCandidate(provider="x",model="y",input_cost_per_million=1,output_cost_per_million=2)
     assert m.input_cost_per_million+m.output_cost_per_million==3
+
+
+def test_approval_dangerous():
+    a=ApprovalManager()
+    assert a.requires_confirmation("terminal",{"command":"rm -rf /"},autonomous=True) is True
