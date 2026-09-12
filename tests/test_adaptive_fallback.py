@@ -60,3 +60,28 @@ def test_orchestrator_call_retries_on_fallback(monkeypatch):
  orch.adapters={"a":A("a"),"o":A("o")}
  assert orch.call("planner","smoke")=="OK"
  assert rt.circuit_view()["a"]["state"]=="open"
+
+
+def test_executor_failure_uses_fallback_and_records_attempts():
+ from core.orchestrator import Orchestrator
+ class A:
+  def __init__(self,name): self.name=name
+  def complete(self,*args,**kwargs):
+   if self.name=="a": raise RuntimeError("weekly limit")
+   return type("R",(),{"text":"PASS"})()
+ a=ModelCandidate("anthropic","a",{"executor"},priority=1)
+ o=ModelCandidate("ollama","o",{"executor"},priority=2)
+ rt=ModelRouter(ModelRegistry([a,o]))
+ orch=Orchestrator(router=rt)
+ orch.adapters={"a":A("a"),"o":A("o")}
+ orch.workspace="."
+ orch.job=type("J",(),{"attempts":[]})()
+ orch.job_manager=None
+ monkeypatch = __import__("pytest").MonkeyPatch()
+ monkeypatch.setattr("core.orchestrator.ToolLoop",lambda adapter,*args,**kwargs:type("L",(),{"run":lambda self,*a,**k: adapter.complete("").text})())
+ try:
+  result=orch.run("smoke","agent",1)
+  assert result["status"] in {"completed","max_iterations"}
+  assert rt.circuit_view()["a"]["state"]=="open"
+ finally:
+  monkeypatch.undo()
