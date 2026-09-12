@@ -91,3 +91,28 @@ class ModelRouter:
   for m in self.registry.models:
    if m.provider==provider and m.model==model: return {"provider":provider,"model":model,"available":self._available(m)}
   raise KeyError("model not found")
+
+ def benchmark_model(self,provider,model,adapter,timeout=45):
+  import time,json
+  tests=[
+   ("planning","Create a 3-step implementation plan for a small web app. Return exactly 3 numbered steps."),
+   ("coding","Write a Python function add(a,b) that returns a+b. Return code only."),
+   ("reasoning","What is 17*19? Return only the integer."),
+   ("json","Return exactly JSON with keys ok and value, where ok=true and value=42."),
+   ("tool_use","Explain in one sentence whether you support function/tool calling.")
+  ]
+  results=[]; total=0.0
+  for name,prompt in tests:
+   started=time.time()
+   try:
+    r=adapter.complete(prompt,timeout=timeout)
+    elapsed=time.time()-started; total+=elapsed; text=r.text.strip()
+    passed=(len(text)>0 and (name!="reasoning" or "323" in text) and (name!="json" or '"ok"' in text) and (name!="coding" or "return" in text))
+    results.append({"test":name,"passed":passed,"latency":round(elapsed,3)})
+   except Exception as e:
+    results.append({"test":name,"passed":False,"error":str(e)[:180]})
+  passed=sum(1 for x in results if x["passed"])
+  score=round(passed/len(results)*100,1)
+  key=provider+"/"+model
+  self.benchmarks[key]={"score":score,"tests":results,"total_latency":round(total,3),"updated_at":time.time()}
+  return {"provider":provider,"model":model,"score":score,"tests":results}
