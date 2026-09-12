@@ -88,10 +88,10 @@ class Orchestrator:
                         self.router.report_success(m)
                         break
                     except Exception as e:
-                        self.router.report_failure(m)
                         error=str(e)[:180]
+                        failure=self.router.report_failure(m,error=error)
                         errors.append(f"{m.provider}: {error}")
-                        self.emit("provider.failed",error,provider=m.provider,model=m.model,role="executor",step=step)
+                        self.emit("provider.failed",error,provider=m.provider,model=m.model,role="executor",step=step,category=failure["category"],cooldown_seconds=failure["cooldown_seconds"])
                 if output is None:
                     raise ProviderError("All executor providers failed: "+"; ".join(errors))
             except Exception as e:
