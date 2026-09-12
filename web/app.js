@@ -31,3 +31,5 @@ async function saveModel(i){const ms=await(await api('/model-pool')).json();cons
 async function discoverModels(){const x=await(await api('/model-pool/discover',{method:'POST'})).json();add('DISCOVERY','OpenRouter: added '+(x.added||0)+' models');await renderModelManager();await loadModelPool()}
 
 async function loadLearning(){try{const rows=await(await api('/learning')).json();$('learning').innerHTML=rows.length?rows.map(r=>'<div class="model-row"><b>'+r.model+'</b> · '+r.role+' · '+(r.success_rate*100).toFixed(1)+'% · '+r.latency.toFixed(1)+'s · '+r.tasks+' tasks</div>').join(''):'No task history yet.'}catch(e){$('learning').textContent='Unavailable'}}
+
+async function loadTaskGraph(sid){try{const x=await(await api('/task-graph/'+encodeURIComponent(sid))).json();const e=x.events||[];const g=e.length?e[e.length-1].message||e[e.length-1].data:e;const arr=Array.isArray(g)?g:[];$('taskGraph').innerHTML=arr.map(n=>'<div class="model-row"><b>'+n.id+'</b> · '+n.title+' · '+n.status+'</div>').join('')||'No graph data'}catch(e){$('taskGraph').textContent='Unavailable'}}
