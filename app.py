@@ -89,6 +89,12 @@ def discover_models(_:None=Depends(auth)):
 @app.post("/model-pool/refresh")
 def refresh_model_pool(_:None=Depends(auth)): return router.refresh_free_pool()
 
+@app.get("/merge-status/{sid}")
+def merge_status(sid:str,_:None=Depends(auth)):
+    s=sessions.get(sid)
+    if not s: raise HTTPException(404,"session not found")
+    return {"session_id":sid,"events":[e for e in s.events if e.get("kind") in ("merge.check","merge.completed","merge.failed")]}
+
 @app.get("/task-graph/{sid}")
 def task_graph(sid:str,_:None=Depends(auth)):
     s=sessions.get(sid)
