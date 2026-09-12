@@ -40,8 +40,8 @@ class Orchestrator:
                 self.router.report_success(m)
                 self.router.report_latency(m,__import__("time").time()-started,True)
                 return result.text
-            except ProviderError as e:
-                self.router.report_failure(m); errors.append(str(e))
+            except Exception as e:
+                self.router.report_failure(m); errors.append(f"{m.provider}: {str(e)[:180]}")
         raise ProviderError("No available provider: "+"; ".join(errors))
 
     def run(self,task,mode="agent",max_iterations=30):
