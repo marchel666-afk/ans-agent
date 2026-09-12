@@ -73,7 +73,8 @@ def startup(_:None=Depends(auth)):
       "github":github.enabled(),
       "jobs":os.path.exists(jobs.db_path),
     }
-    return {"ready":checks["workspace"] and checks["jobs"] and checks["claude_code"],"checks":checks}
+    routing_ready=bool(router.rank("planner")) and bool(router.rank("executor",requires_tools=True))
+    return {"ready":checks["workspace"] and checks["jobs"] and routing_ready,"checks":checks,"routing":{"planner":bool(router.rank("planner")),"executor":bool(router.rank("executor",requires_tools=True))}}
 
 @app.get("/health")
 def health():
@@ -83,7 +84,8 @@ def health():
 def diagnostics(_:None=Depends(auth)):
     adapters=Orchestrator(router,WORKSPACE).adapters
     checks={"workspace":os.path.isdir(WORKSPACE),"claude_code":bool(adapters.get("claude-code")),"openai":bool(adapters.get("openai")),"gemini":bool(adapters.get("gemini")),"openrouter":bool(adapters.get("openrouter")),"ollama":bool(adapters.get("ollama")),"github":github.enabled(),"job_persistence":os.path.exists(jobs.db_path)}
-    return {"ok":checks["workspace"] and checks["claude_code"] and checks["job_persistence"],"checks":checks}
+    routing_ready=bool(router.rank("planner")) and bool(router.rank("executor",requires_tools=True))
+    return {"ok":checks["workspace"] and checks["job_persistence"] and routing_ready,"checks":checks,"routing":{"planner":bool(router.rank("planner")),"executor":bool(router.rank("executor",requires_tools=True))}}
 
 @app.get("/profiles")
 def profiles_list(_:None=Depends(auth)): return profiles.all()
