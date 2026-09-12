@@ -33,6 +33,9 @@ class RunRequest(BaseModel):
     session_id:str|None=None
 class ApprovalRequest(BaseModel):
     allow:bool
+class BranchRequest(BaseModel): name:str
+class CommitRequest(BaseModel): message:str
+class PRRequest(BaseModel): head:str; base:str|None=None; title:str; body:str=""; draft:bool=True
 
 def auth(authorization:str|None=Header(default=None)):
     if authorization != f"Bearer {AUTH_TOKEN}":
@@ -88,6 +91,29 @@ def get_memory(project:str="default",_:None=Depends(auth)):
 @app.post("/memory")
 async def save_memory(project:str,key:str,value:str,_:None=Depends(auth)):
     ProjectMemory(sessions,project).remember(key,value); return {"ok":True}
+
+@app.get("/workspace/branch")
+def workspace_branch(_:None=Depends(auth)): return GitWorkspace(WORKSPACE).branch()
+
+@app.post("/workspace/branch")
+def workspace_create_branch(req:BranchRequest,_:None=Depends(auth)):
+    try:return GitWorkspace(WORKSPACE).create_branch(req.name)
+    except Exception as e: raise HTTPException(400,str(e))
+
+@app.post("/workspace/commit")
+def workspace_commit(req:CommitRequest,_:None=Depends(auth)):
+    try:return GitWorkspace(WORKSPACE).commit(req.message)
+    except Exception as e: raise HTTPException(400,str(e))
+
+@app.post("/workspace/push")
+def workspace_push(_:None=Depends(auth)):
+    try:return GitWorkspace(WORKSPACE).push()
+    except Exception as e: raise HTTPException(400,str(e))
+
+@app.post("/github/pr")
+def github_pr(req:PRRequest,_:None=Depends(auth)):
+    try:return github.create_pr(req.head,req.base or os.getenv("GITHUB_BASE_BRANCH","main"),req.title,req.body,req.draft)
+    except Exception as e: raise HTTPException(502,str(e))
 
 @app.get("/github")
 def github_config(_:None=Depends(auth)): return github.config()
