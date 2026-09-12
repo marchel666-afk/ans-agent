@@ -12,9 +12,9 @@ class ToolLoop:
    name,args=obj["tool"],obj.get("args",{})
    if self.approval and not self.approval.request(self.session_id,name,args):
     self.emit("approval.waiting",f"Waiting for approval: {name}",tool=name,args=args)
-    if hasattr(self.executor,"job") and self.executor.job: self.executor.job.status="waiting"
+    if hasattr(self.executor,"job") and self.executor.job: self.executor.job.manager.set_waiting(self.executor.job)
     if not self.approval.wait_for(self.session_id,name,args): return "APPROVAL_DENIED_OR_TIMEOUT: "+name
-    if hasattr(self.executor,"job") and self.executor.job: self.executor.job.status="running"
+    if hasattr(self.executor,"job") and self.executor.job: self.executor.job.manager.set_running(self.executor.job)
    self.emit("tool.call",name,args=args)
    try: result=self.executor.execute(name,args)
    except Exception as e: result={"ok":False,"error":str(e)}
