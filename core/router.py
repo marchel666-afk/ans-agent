@@ -93,19 +93,22 @@ class ModelRouter:
   role_bonus=0 if role in m.roles else 100
   free_bonus=-25 if m.free else 0
   tool_bonus=-20 if m.tool_capable else 0
-  # Role-specific production outcomes are the strongest signal once enough
-  # observations exist; Bayesian smoothing avoids overreacting to one task.
   rs=self._role_outcome(m.model,role)
   if rs["tasks"]>0:
    n=rs["tasks"]
    role_success=(rs["successes"]+2.0)/(n+4.0)
    role_latency=rs["latency"] or latency
-   production=(1-role_success)*45 + min(role_latency,120.0)*0.20
-   if role_b is not None: production += (100-role_b)*0.25
-   return role_bonus + m.priority + free_bonus + tool_bonus + production
-  if role_b is not None:
-   return role_bonus + m.priority + free_bonus + tool_bonus + (100-role_b)*0.8
-  return role_bonus + m.priority + free_bonus + tool_bonus + (1-success)*30 + latency*.25
+  else:
+   role_success=success
+   role_latency=latency
+  # Lower is better. Quality is rewarded, while latency and estimated cost
+  # are penalized. Static priority remains a tie-breaker rather than the sole signal.
+  quality_penalty=(1-role_success)*55
+  latency_penalty=min(role_latency,120.0)*0.18
+  estimated_cost=self.cost_estimate(m,4000,2000)
+  cost_penalty=min(estimated_cost*1000.0,40.0)
+  benchmark_penalty=(100-role_b)*0.25 if role_b is not None else 0
+  return role_bonus + m.priority + free_bonus + tool_bonus + quality_penalty + latency_penalty + cost_penalty + benchmark_penalty
 
  def _role_outcome(self,model,role):
   with sqlite3.connect(self.db) as c:
