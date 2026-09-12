@@ -14,6 +14,9 @@ Copy `deploy/nginx.conf` to an Nginx site configuration, replace `server_name` w
 ## Data
 SQLite and the agent workspace are bind-mounted outside the container. Use `scripts/backup.sh` regularly.
 
+## Preflight
+Run `bash scripts/healthcheck.sh` after deployment. Then authenticate in the UI and call `/startup` to verify the configured workspace and providers.
+
 ## Security
 Do not expose port 8000 directly to the Internet. Keep secrets only in `.env`, protect the UI with an authentication layer before public deployment, and restrict the workspace to a dedicated project directory.
 
