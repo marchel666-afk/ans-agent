@@ -14,12 +14,13 @@ from core.memory import ProjectMemory
 from core.github import GitHubService
 from core.jobs import JobManager
 from core.security import get_token
+from core.profiles import ProfileRegistry
 import asyncio, os
 
 app=FastAPI(title="ANS Agent")
 app.mount("/web", StaticFiles(directory="web"), name="web")
 router=ModelRouter(); sessions=SessionStore(); events=EventBus(); approvals=ApprovalManager()
-github=GitHubService(); jobs=JobManager(); WORKSPACE=os.path.abspath(os.getenv("ANS_WORKSPACE","./workspace")); AUTH_TOKEN=get_token()
+github=GitHubService(); jobs=JobManager(); profiles=ProfileRegistry(); WORKSPACE=os.path.abspath(os.getenv("ANS_WORKSPACE","./workspace")); AUTH_TOKEN=get_token()
 
 class RouteRequest(BaseModel):
     role:str
@@ -43,6 +44,9 @@ def guarded_path(path:str):
 
 @app.get("/health")
 def health(): return {"status":"ok","service":"ans-agent"}
+
+@app.get("/profiles")
+def profiles_list(_:None=Depends(auth)): return profiles.all()
 
 @app.get("/models")
 def models(_:None=Depends(auth)):
