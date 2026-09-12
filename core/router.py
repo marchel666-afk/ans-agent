@@ -15,6 +15,8 @@ class ModelRouter:
    c.execute("CREATE TABLE IF NOT EXISTS model_stats(model TEXT PRIMARY KEY, ok INTEGER DEFAULT 0, fail INTEGER DEFAULT 0, latency REAL DEFAULT 0)")
    c.execute("CREATE TABLE IF NOT EXISTS provider_health(model TEXT PRIMARY KEY, failures INTEGER DEFAULT 0, cooldown_until REAL DEFAULT 0, category TEXT DEFAULT '', updated_at REAL DEFAULT 0)")
    for model,ok,fail,lat in c.execute("SELECT model,ok,fail,latency FROM model_stats"): self.stats[model]={"ok":ok,"fail":fail,"latency":lat}
+   for model,n,until,category,updated in c.execute("SELECT model,failures,cooldown_until,category,updated_at FROM provider_health"):
+    if until > time.time(): self.failures[model]=(n,until,category)
  def _persist(self,m):
   s=self.stats[m.model]
   with sqlite3.connect(self.db) as c: c.execute("INSERT INTO model_stats(model,ok,fail,latency) VALUES(?,?,?,?) ON CONFLICT(model) DO UPDATE SET ok=excluded.ok,fail=excluded.fail,latency=excluded.latency",(m.model,s["ok"],s["fail"],s["latency"]))
