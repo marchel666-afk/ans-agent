@@ -89,6 +89,9 @@ def discover_models(_:None=Depends(auth)):
 @app.post("/model-pool/refresh")
 def refresh_model_pool(_:None=Depends(auth)): return router.refresh_free_pool()
 
+@app.get("/learning")
+def learning(role:str|None=None,_:None=Depends(auth)): return router.learning_view(role)
+
 @app.get("/model-pool")
 def model_pool(_:None=Depends(auth)): return router.pool()
 
