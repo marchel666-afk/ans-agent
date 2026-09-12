@@ -89,7 +89,13 @@ class Orchestrator:
                 output=None
                 errors=[]
                 job=getattr(self,"job",None)
-                for attempt_number,m in enumerate(candidates,1):
+                tried=set()
+                attempt_number=0
+                while candidates:
+                    m=candidates.pop(0)
+                    if m.model in tried: continue
+                    tried.add(m.model)
+                    attempt_number += 1
                     adapter=self.adapters.get(m.model) or self.adapters.get(m.provider)
                     if not adapter:
                         errors.append(f"{m.provider}: adapter unavailable")
@@ -119,6 +125,7 @@ class Orchestrator:
                         if manager: manager._save(job)
                         errors.append(f"{m.provider}: {error}")
                         self.emit("provider.failed",error,provider=m.provider,model=m.model,role="executor",step=step,attempt=attempt_number,category=failure["category"],cooldown_seconds=failure["cooldown_seconds"])
+                        candidates=self.router.fallback_policy(failure["category"],"executor",policy,exclude=tried)
                 if output is None:
                     raise ProviderError("All executor providers failed: "+"; ".join(errors))
             except Exception as e:
