@@ -50,16 +50,16 @@ class ModelRouter:
  def _claude_cli_available(self):
   import shutil
   return shutil.which("claude") is not None
- def rank(self,role,requires_tools=False,prefer_free=False):
+ def rank(self,role,requires_tools=False,prefer_free=False,max_cost=None):
   cs=self.registry.for_role(role)
   if requires_tools: cs=[m for m in cs if m.tool_capable]
   if prefer_free:
    free=[m for m in cs if m.free]
    if free: cs=free
   now=time.time()
-  return sorted([m for m in cs if self._available(m)],key=lambda m:(self.failures.get(m.model,(0,0))[1]>now,self.score(m,role),self.failures.get(m.model,(0,0))[0]))
- def choose(self,role,*,requires_tools=False,prefer_free=False):
-  cs=self.rank(role,requires_tools,prefer_free)
+  return sorted([m for m in cs if self._available(m) and (max_cost is None or m.input_cost_per_million+m.output_cost_per_million<=max_cost)],key=lambda m:(self.failures.get(m.model,(0,0))[1]>now,self.score(m,role),self.failures.get(m.model,(0,0))[0]))
+ def choose(self,role,*,requires_tools=False,prefer_free=False,max_cost=None):
+  cs=self.rank(role,requires_tools,prefer_free,max_cost)
   if not cs: raise RuntimeError(f"No model available for role={role!r}")
   return cs[0]
  def score(self,m,role):
@@ -82,6 +82,11 @@ class ModelRouter:
 
  def pool(self):
   return [{"provider":m.provider,"model":m.model,"roles":sorted(m.roles),"free":m.free,"tool_capable":m.tool_capable,"priority":m.priority,"available":self._available(m),"stats":self.stats_view().get(m.model,{})} for m in self.registry.models]
+ def cost_estimate(self,m,input_tokens,output_tokens):
+  return (input_tokens/1_000_000)*m.input_cost_per_million+(output_tokens/1_000_000)*m.output_cost_per_million
+ def budget_rank(self,role,budget,requires_tools=False):
+  cs=self.rank(role,requires_tools)
+  return sorted(cs,key=lambda m:(self.score(m,role),self.cost_estimate(m,4000,2000)/max(budget,0.000001)))
  def update_model(self,provider,model,changes):
   for m in self.registry.models:
    if m.provider==provider and m.model==model:
