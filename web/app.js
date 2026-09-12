@@ -21,6 +21,7 @@ function renderTrace(x){
   }
   node.append(title,meta); box.appendChild(node); box.scrollTop=box.scrollHeight;
 }
+async function refreshCircuits(){try{const r=await api('/circuit-breakers');const box=$('circuitBreakers');if(!box)return;box.innerHTML='';Object.entries(r.circuits||{}).forEach(([m,v])=>{const d=document.createElement('div');d.className='circuit '+v.state.replace('-','');d.textContent=m+' · '+v.state+(v.cooldown_remaining?' · '+v.cooldown_remaining+'s':'');box.appendChild(d)})}catch(e){}}
 function connect(sid){
   if(socket)socket.close();
   const proto=location.protocol==='https:'?'wss://':'ws://';
@@ -28,7 +29,7 @@ function connect(sid){
   socket.onmessage=e=>{
     const x=JSON.parse(e.data);
     add(x.kind||'EVENT',x.message||'');
-    if(['provider.selected','provider.failed','run.completed','run.started'].includes(x.kind)) renderTrace(x);
+    if(['provider.selected','provider.failed','run.completed','run.started'].includes(x.kind)) renderTrace(x); if(x.kind==='provider.failed'||x.kind==='provider.selected') refreshCircuits();
     if(x.kind==='provider.selected'){
       add('ROUTING',(x.provider||x.message)+' · policy='+(x.policy||'balanced')+' · score='+(x.score??'—')+' · cost=$'+(x.estimated_cost??'—')+(x.budget!=null?' · budget=$'+x.budget:''));
     }
