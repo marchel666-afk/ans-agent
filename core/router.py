@@ -174,7 +174,15 @@ class ModelRouter:
   return {k:{**v,"success_rate":round(v["ok"]/(v["ok"]+v["fail"]),3) if v["ok"]+v["fail"] else 0} for k,v in self.stats.items()}
 
  def pool(self):
-  return [{"provider":m.provider,"model":m.model,"roles":sorted(m.roles),"free":m.free,"tool_capable":m.tool_capable,"priority":m.priority,"available":self._available(m),"stats":self.stats_view().get(m.model,{})} for m in self.registry.models]
+  now=time.time()
+  def healthy(m):
+   state=self.failures.get(m.model)
+   return self._available(m) and (not state or state[1] <= now)
+  circuits=self.circuit_view()
+  return [{"provider":m.provider,"model":m.model,"roles":sorted(m.roles),"free":m.free,"tool_capable":m.tool_capable,"priority":m.priority,
+           "available":healthy(m),"configured":self._available(m),
+           "circuit":circuits.get(m.model,{"state":"closed"}),
+           "stats":self.stats_view().get(m.model,{})} for m in self.registry.models]
  def cost_estimate(self,m,input_tokens,output_tokens):
   return (input_tokens/1_000_000)*m.input_cost_per_million+(output_tokens/1_000_000)*m.output_cost_per_million
  def budget_rank(self,role,budget,requires_tools=False):
