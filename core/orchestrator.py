@@ -50,8 +50,11 @@ class Orchestrator:
             step=state.plan[0]; state.iteration+=1
             self.emit("step.started",step,iteration=state.iteration)
             try:
-                adapter=self.adapters.get("claude-code") or self.adapters.get("anthropic")
-                if not adapter: raise ProviderError("Claude Code adapter unavailable")
+                candidates=self.router.rank("executor",requires_tools=True)
+                if not candidates: raise ProviderError("No executor model available")
+                m=candidates[0]
+                adapter=self.adapters.get(m.model) or self.adapters.get(m.provider)
+                if not adapter: raise ProviderError("Executor adapter unavailable: "+m.provider)
                 executor=ToolExecutor(self.workspace)
                 loop=ToolLoop(adapter,executor,emit=self.emit,
                               approval=self.approval,session_id=self.session_id)
