@@ -52,10 +52,12 @@ class ModelRouter:
   n,_=self.failures.get(m.model,(0,0));self.failures[m.model]=(n+1,time.time()+min(900,backoff*(2**n))); s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["fail"]+=1; self._persist(m)
  def report_latency(self,m,seconds,ok=True):
   s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["latency"]=seconds if not s["latency"] else s["latency"]*.8+seconds*.2; s["ok" if ok else "fail"]+=1; self._persist(m)
- def report_success(self,m): self.failures.pop(m.model,None)
+ def report_success(self,m): self.failures.pop(m.model,None); self._persist(m)
+ def stats_view(self):
+  return {k:{**v,"success_rate":round(v["ok"]/(v["ok"]+v["fail"]),3) if v["ok"]+v["fail"] else 0} for k,v in self.stats.items()}
 
  def pool(self):
-  return [{"provider":m.provider,"model":m.model,"roles":sorted(m.roles),"free":m.free,"tool_capable":m.tool_capable,"priority":m.priority,"available":self._available(m)} for m in self.registry.models]
+  return [{"provider":m.provider,"model":m.model,"roles":sorted(m.roles),"free":m.free,"tool_capable":m.tool_capable,"priority":m.priority,"available":self._available(m),"stats":self.stats_view().get(m.model,{})} for m in self.registry.models]
  def update_model(self,provider,model,changes):
   for m in self.registry.models:
    if m.provider==provider and m.model==model:
