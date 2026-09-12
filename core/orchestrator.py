@@ -18,7 +18,7 @@ class Orchestrator:
         self.emit=emit or (lambda *a,**k:None)
         self.approval=approval
         self.session_id=session_id
-        self.memory=None
+        self.memory=ProjectMemory(SessionStoreProxy(), "default") if False else None
 
     def call(self,role,prompt,prefer_free=False,tools=False):
         profile=getattr(self,"profile",None)
@@ -45,6 +45,7 @@ class Orchestrator:
         raise ProviderError("No available provider: "+"; ".join(errors))
 
     def run(self,task,mode="agent",max_iterations=30):
+        original_task=task
         state=AgentState(task=task,mode=TaskMode(mode),max_iterations=max_iterations)
         if self.memory:
             context=self.memory.get_context()
@@ -92,6 +93,8 @@ class Orchestrator:
                 if state.iteration>=state.max_iterations: break
             else:
                 state.plan.append(state.plan.pop(0))
+        if self.memory and state.completed:
+            self.memory.remember_result(original_task, "\n".join(state.observations[-8:]))
         state.status="completed" if not state.plan else "max_iterations"
         return {"status":state.status,"plan":state.plan,"completed":state.completed,"observations":state.observations,"iterations":state.iteration}
 
