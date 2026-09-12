@@ -12,13 +12,14 @@ from core.tools import Workspace
 from core.approval import ApprovalManager
 from core.memory import ProjectMemory
 from core.github import GitHubService
+from core.jobs import JobManager
 from core.security import get_token
 import asyncio, os
 
 app=FastAPI(title="ANS Agent")
 app.mount("/web", StaticFiles(directory="web"), name="web")
 router=ModelRouter(); sessions=SessionStore(); events=EventBus(); approvals=ApprovalManager()
-github=GitHubService(); WORKSPACE=os.path.abspath(os.getenv("ANS_WORKSPACE","./workspace")); AUTH_TOKEN=get_token()
+github=GitHubService(); jobs=JobManager(); WORKSPACE=os.path.abspath(os.getenv("ANS_WORKSPACE","./workspace")); AUTH_TOKEN=get_token()
 
 class RouteRequest(BaseModel):
     role:str
@@ -54,6 +55,17 @@ def models(_:None=Depends(auth)):
 @app.post("/route")
 def route(req:RouteRequest,_:None=Depends(auth)):
     return router.choose(req.role,requires_tools=req.requires_tools,prefer_free=req.prefer_free).__dict__
+
+@app.get("/jobs/{jid}")
+def get_job(jid:str,_:None=Depends(auth)):
+    j=jobs.get(jid)
+    if not j: raise HTTPException(404,"job not found")
+    return j.__dict__
+
+@app.post("/jobs/{jid}/cancel")
+def cancel_job(jid:str,_:None=Depends(auth)):
+    if not jobs.cancel(jid): raise HTTPException(409,"job cannot be cancelled")
+    return {"ok":True}
 
 @app.get("/sessions")
 def list_sessions(_:None=Depends(auth)):
