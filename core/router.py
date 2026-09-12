@@ -82,8 +82,27 @@ class ModelRouter:
   free_bonus=-25 if m.free else 0
   tool_bonus=-20 if m.tool_capable else 0
   return role_bonus + m.priority + free_bonus + tool_bonus + (1-success)*30 + latency*.25
- def report_failure(self,m,backoff=30):
-  n,_=self.failures.get(m.model,(0,0));self.failures[m.model]=(n+1,time.time()+min(900,backoff*(2**n))); s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["fail"]+=1; self._persist(m)
+ def classify_failure(self,error):
+  text=str(error).lower()
+  if "weekly limit" in text or "weekly usage" in text or "resets " in text:
+   return "weekly_limit",int(os.getenv("ANS_WEEKLY_LIMIT_COOLDOWN", "21600"))
+  if "rate limit" in text or "429" in text or "too many requests" in text:
+   return "rate_limit",300
+  if "unauthorized" in text or "invalid api key" in text or "missing " in text and "key" in text:
+   return "auth",1800
+  if "timeout" in text or "timed out" in text:
+   return "timeout",120
+  return "provider_error",30
+
+ def report_failure(self,m,backoff=30,error=None):
+  n,_=self.failures.get(m.model,(0,0))
+  category,base=self.classify_failure(error or "")
+  if error is not None: backoff=base
+  cooldown=min(900,backoff*(2**n))
+  if category=="weekly_limit": cooldown=max(base,cooldown)
+  self.failures[m.model]=(n+1,time.time()+cooldown)
+  s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["fail"]+=1; self._persist(m)
+  return {"category":category,"cooldown_seconds":cooldown}
  def report_latency(self,m,seconds,ok=True):
   s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["latency"]=seconds if not s["latency"] else s["latency"]*.8+seconds*.2; s["ok" if ok else "fail"]+=1; self._persist(m)
  def report_success(self,m):
