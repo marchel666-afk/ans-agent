@@ -103,13 +103,16 @@ class ModelRouter:
   if error is not None: backoff=base
   cooldown=min(900,backoff*(2**n))
   if category=="weekly_limit": cooldown=max(base,cooldown)
-  self.failures[m.model]=(n+1,time.time()+cooldown)
+  until=time.time()+cooldown
+  self.failures[m.model]=(n+1,until,category)
+  with sqlite3.connect(self.db) as c: c.execute("INSERT INTO provider_health(model,failures,cooldown_until,category,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(model) DO UPDATE SET failures=excluded.failures,cooldown_until=excluded.cooldown_until,category=excluded.category,updated_at=excluded.updated_at",(m.model,n+1,until,category,time.time()))
   s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["fail"]+=1; self._persist(m)
   return {"category":category,"cooldown_seconds":cooldown}
  def report_latency(self,m,seconds,ok=True):
   s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["latency"]=seconds if not s["latency"] else s["latency"]*.8+seconds*.2; s["ok" if ok else "fail"]+=1; self._persist(m)
  def report_success(self,m):
   self.failures.pop(m.model,None); self._persist(m)
+  with sqlite3.connect(self.db) as c: c.execute("DELETE FROM provider_health WHERE model=?",(m.model,))
   return {"ok":True}
  def stats_view(self):
   return {k:{**v,"success_rate":round(v["ok"]/(v["ok"]+v["fail"]),3) if v["ok"]+v["fail"] else 0} for k,v in self.stats.items()}
