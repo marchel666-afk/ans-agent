@@ -93,7 +93,7 @@ def models(_:None=Depends(auth)):
     o=Orchestrator(router,WORKSPACE)
     return [{"provider":m.provider,"model":m.model,"roles":sorted(m.roles),"free":m.free,
              "tool_capable":m.tool_capable,
-             "available":bool(o.adapters.get(m.model) or o.adapters.get(m.provider))}
+             "available":router._available(m)}
             for m in router.registry.models]
 
 @app.post("/model-pool/benchmark/{provider}/{model:path}")
