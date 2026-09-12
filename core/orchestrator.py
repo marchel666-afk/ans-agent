@@ -108,5 +108,18 @@ class Orchestrator:
                 except Exception: pass
             return {"output":output,"branch":branch,"path":path}
         results=graph.run_parallel(execute,max_workers=max_workers)
+        if git:
+            for node in graph.nodes.values():
+                item=results.get(node.id,{})
+                branch=item.get("branch") if isinstance(item,dict) else None
+                if branch:
+                    check=git.can_merge(branch)
+                    self.emit("merge.check",{"node":node.id,"branch":branch,"clean":check["clean"]})
+                    if check["clean"]:
+                        try:
+                            git.merge(branch)
+                            self.emit("merge.completed",{"node":node.id,"branch":branch})
+                        except Exception as e:
+                            self.emit("merge.failed",{"node":node.id,"branch":branch,"error":str(e)})
         self.emit("task.graph.completed",graph.snapshot())
         return {"status":"completed" if all(n.status=="done" for n in graph.nodes.values()) else "partial","plan":[],"completed":[n.title for n in graph.nodes.values() if n.status=="done"],"observations":results,"iterations":state.iteration}
