@@ -6,3 +6,5 @@
 .trace-node.failed{border-color:#58363a}.trace-node.success{border-color:#31533b}
 .trace-title{font-size:9px;letter-spacing:.1em;color:#8f99a4;font-weight:700}.trace-meta{margin-top:5px;color:#c0c7cf;font-size:11px;word-break:break-word}
 #taskGraph{max-height:330px;overflow:auto;margin-top:8px}
+
+.circuit-breakers{margin-top:14px;padding-top:10px;border-top:1px solid #252c34}.circuit{font-size:11px;padding:7px 9px;margin-top:5px;border:1px solid #252c34;border-radius:6px;background:#12161b}.circuit.open{border-color:#58363a}.circuit.halfopen{border-color:#66552e}.circuit.closed{border-color:#31533b}
