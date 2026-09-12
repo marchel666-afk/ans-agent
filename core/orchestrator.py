@@ -43,8 +43,11 @@ class Orchestrator:
             try:
                 adapter=self.adapters.get("claude-code") or self.adapters.get("anthropic")
                 if not adapter: raise ProviderError("Claude Code adapter unavailable")
-                loop=ToolLoop(adapter,ToolExecutor(self.workspace),emit=self.emit,
+                executor=ToolExecutor(self.workspace)
+                loop=ToolLoop(adapter,executor,emit=self.emit,
                               approval=self.approval,session_id=self.session_id)
+                job=getattr(self,"job",None)
+                executor.job=job
                 output=loop.run(f"TASK: {task}\nSTEP: {step}\nInspect the workspace and implement this step. Verify your changes.",max_steps=20)
             except Exception as e:
                 output="EXECUTOR ERROR: "+str(e)
