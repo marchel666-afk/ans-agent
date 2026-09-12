@@ -26,3 +26,17 @@ class ModelRouter:
  def report_failure(self,m,backoff=30):
   n,_=self.failures.get(m.model,(0,0));self.failures[m.model]=(n+1,time.time()+min(900,backoff*(2**n)))
  def report_success(self,m): self.failures.pop(m.model,None)
+
+ def pool(self):
+  return [{"provider":m.provider,"model":m.model,"roles":sorted(m.roles),"free":m.free,"tool_capable":m.tool_capable,"priority":m.priority,"available":self._available(m)} for m in self.registry.models]
+ def update_model(self,provider,model,changes):
+  for m in self.registry.models:
+   if m.provider==provider and m.model==model:
+    for k in ("priority","free","roles"):
+     if k in changes: setattr(m,k,set(changes[k]) if k=="roles" else changes[k])
+    return {"ok":True,"provider":provider,"model":model}
+  raise KeyError("model not found")
+ def test_model(self,provider,model):
+  for m in self.registry.models:
+   if m.provider==provider and m.model==model: return {"provider":provider,"model":model,"available":self._available(m)}
+  raise KeyError("model not found")
