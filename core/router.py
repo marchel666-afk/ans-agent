@@ -140,3 +140,15 @@ class ModelRouter:
   score=round(sum(x["passed"] for x in results)/len(results)*100,1)
   key=provider+"/"+model; self.benchmarks.setdefault(key,{})["roles"]={**self.benchmarks.get(key,{}).get("roles",{}),role:{"score":score,"tests":results,"updated_at":time.time()}}
   return {"provider":provider,"model":model,"role":role,"score":score,"tests":results}
+
+ def record_task(self,m,role,success,latency,tool_calls=0,repairs=0,cost=0.0):
+  with sqlite3.connect(self.db) as c: c.execute("CREATE TABLE IF NOT EXISTS task_outcomes(id INTEGER PRIMARY KEY AUTOINCREMENT,model TEXT,role TEXT,success INTEGER,latency REAL,tool_calls INTEGER,repairs INTEGER,cost REAL,created_at REAL)")
+  with sqlite3.connect(self.db) as c: c.execute("INSERT INTO task_outcomes(model,role,success,latency,tool_calls,repairs,cost,created_at) VALUES(?,?,?,?,?,?,?,?)",(m.model,role,int(success),float(latency),int(tool_calls),int(repairs),float(cost),time.time()))
+  self.report_latency(m,latency,success)
+ def learning_view(self,role=None):
+  with sqlite3.connect(self.db) as c:
+   c.execute("CREATE TABLE IF NOT EXISTS task_outcomes(id INTEGER PRIMARY KEY AUTOINCREMENT,model TEXT,role TEXT,success INTEGER,latency REAL,tool_calls INTEGER,repairs INTEGER,cost REAL,created_at REAL)")
+   q="SELECT model,role,COUNT(*),AVG(success),AVG(latency),AVG(tool_calls),AVG(repairs),AVG(cost) FROM task_outcomes"; args=()
+   if role: q+=" WHERE role=?"; args=(role,)
+   q+=" GROUP BY model,role"; rows=c.execute(q,args).fetchall()
+  return [{"model":r[0],"role":r[1],"tasks":r[2],"success_rate":round(r[3],3),"latency":round(r[4],3),"tool_calls":round(r[5],2),"repairs":round(r[6],2),"cost":round(r[7],6)} for r in rows]
