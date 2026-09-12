@@ -67,6 +67,13 @@ def models(_:None=Depends(auth)):
              "available":bool(o.adapters.get(m.model) or o.adapters.get(m.provider))}
             for m in router.registry.models]
 
+@app.post("/model-pool/benchmark/{provider}/{model:path}")
+def benchmark_model(provider:str,model:str,_:None=Depends(auth)):
+    adapter=Orchestrator(router,WORKSPACE).adapters.get(provider)
+    if not adapter: raise HTTPException(400,"provider unavailable")
+    try: return router.benchmark_model(provider,model,adapter)
+    except Exception as e: raise HTTPException(502,str(e))
+
 @app.post("/model-pool/discover")
 def discover_models(_:None=Depends(auth)):
     try: return router.discover_openrouter()
