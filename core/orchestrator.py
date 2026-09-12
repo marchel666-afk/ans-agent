@@ -16,8 +16,8 @@ class Orchestrator:
         for m in candidates:
             adapter=self.adapters.get(m.model) or self.adapters.get(m.provider)
             if not adapter: errors.append(f"{m.provider}: adapter unavailable"); continue
-            try: return adapter.complete(prompt).text
-            except ProviderError as e: errors.append(str(e))
+            try:\n                result=adapter.complete(prompt); self.router.report_success(m); return result.text
+            except ProviderError as e: self.router.report_failure(m); errors.append(str(e))
         raise ProviderError("No available provider: "+"; ".join(errors))
     def run(self,task,mode="agent",max_iterations=30):
         state=AgentState(task=task,mode=TaskMode(mode),max_iterations=max_iterations)
