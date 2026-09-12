@@ -38,12 +38,16 @@ class Orchestrator:
                 self.emit("provider.selected",m.provider+"/"+m.model,role=role)
                 started=__import__("time").time()
                 result=adapter.complete(prompt,timeout=120,model=m.model,cwd=self.workspace)
+                elapsed=__import__("time").time()-started
                 self.router.report_success(m)
-                self.router.report_latency(m,__import__("time").time()-started,True)
+                self.router.report_latency(m,elapsed,True)
+                self.router.record_task(m,role,True,elapsed)
                 return result.text
             except Exception as e:
                 error=str(e)[:180]
+                elapsed=__import__("time").time()-started
                 failure=self.router.report_failure(m,error=error)
+                self.router.record_task(m,role,False,elapsed)
                 errors.append(f"{m.provider}: {error}")
                 self.emit("provider.failed",error,provider=m.provider,model=m.model,role=role,category=failure["category"],cooldown_seconds=failure["cooldown_seconds"])
         raise ProviderError("No available provider: "+"; ".join(errors))
@@ -86,18 +90,22 @@ class Orchestrator:
                         job.attempts.append(attempt)
                         manager=getattr(self,"job_manager",None)
                         if manager: manager._save(job)
+                    started=__import__("time").time()
                     try:
                         self.emit("provider.selected",m.provider+"/"+m.model,role="executor",step=step,attempt=attempt_number)
                         loop=ToolLoop(adapter,executor,emit=self.emit,
                                       approval=self.approval,session_id=self.session_id)
                         output=loop.run(f"TASK: {task}\nSTEP: {step}\nInspect the workspace and implement this step. Verify your changes.",max_steps=20)
+                        elapsed=__import__("time").time()-started
                         self.router.report_success(m)
+                        self.router.record_task(m,"executor",True,elapsed)
                         attempt.update({"status":"completed","finished_at":__import__("time").time()})
                         if manager: manager._save(job)
                         break
                     except Exception as e:
                         error=str(e)[:180]
                         failure=self.router.report_failure(m,error=error)
+                        self.router.record_task(m,"executor",False,__import__("time").time()-started)
                         attempt.update({"status":"failed","finished_at":__import__("time").time(),"error":error,"category":failure["category"]})
                         if manager: manager._save(job)
                         errors.append(f"{m.provider}: {error}")
