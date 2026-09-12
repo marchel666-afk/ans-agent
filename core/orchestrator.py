@@ -30,7 +30,11 @@ class Orchestrator:
         else:
             candidates=self.router.policy_rank(role,policy,requires_tools=tools,budget=budget)
         errors=[]
-        for m in candidates:
+        tried=set()
+        while candidates:
+            m=candidates.pop(0)
+            if m.model in tried: continue
+            tried.add(m.model)
             adapter=self.adapters.get(m.model) or self.adapters.get(m.provider)
             if not adapter:
                 errors.append(f"{m.provider}: adapter unavailable"); continue
@@ -50,6 +54,8 @@ class Orchestrator:
                 self.router.record_task(m,role,False,elapsed)
                 errors.append(f"{m.provider}: {error}")
                 self.emit("provider.failed",error,provider=m.provider,model=m.model,role=role,category=failure["category"],cooldown_seconds=failure["cooldown_seconds"])
+                candidates=self.router.fallback_policy(failure["category"],role,policy)
+                candidates=[x for x in candidates if x.model not in tried]
         raise ProviderError("No available provider: "+"; ".join(errors))
 
     def run(self,task,mode="agent",max_iterations=30,policy="balanced",budget=None):
