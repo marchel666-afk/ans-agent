@@ -6,6 +6,7 @@ from .tool_executor import ToolExecutor
 from .tool_loop import ToolLoop
 from .task_graph import TaskGraph
 from .git_workspace import GitWorkspaceManager
+import subprocess, os
 
 class Orchestrator:
     def __init__(self,router=None,workspace="./workspace",emit=None,approval=None,session_id=None):
@@ -123,3 +124,8 @@ class Orchestrator:
                             self.emit("merge.failed",{"node":node.id,"branch":branch,"error":str(e)})
         self.emit("task.graph.completed",graph.snapshot())
         return {"status":"completed" if all(n.status=="done" for n in graph.nodes.values()) else "partial","plan":[],"completed":[n.title for n in graph.nodes.values() if n.status=="done"],"observations":results,"iterations":state.iteration}
+
+    def _verify_workspace(self):
+        if not os.path.exists(os.path.join(self.workspace,".git")): return {"ok":True,"tests":"no git repo"}
+        r=subprocess.run(["git","diff","--check"],cwd=self.workspace,text=True,capture_output=True)
+        return {"ok":r.returncode==0,"tests":"git diff --check","output":r.stdout+r.stderr}
