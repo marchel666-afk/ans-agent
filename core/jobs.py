@@ -20,7 +20,11 @@ class JobManager:
   self.emit("job.created","Job queued",job_id=j.id);return j
  def get(self,jid):
   j=self.jobs.get(jid)
-  if j:return j
+  if j:
+   if j.status in {"queued","running","waiting"} and j.started_at and time.time()-j.started_at>j.timeout_seconds:
+    j.status="failed"; j.error=f"Job exceeded timeout of {j.timeout_seconds}s"; j.finished_at=time.time(); self._save(j)
+    self.emit("job.timeout",j.error,job_id=j.id)
+   return j
   with self._db() as c:r=c.execute("SELECT * FROM jobs WHERE id=?",(jid,)).fetchone()
   if not r:return None
   return Job(r[0],r[1],r[2],r[3],r[4],r[5],json.loads(r[6] or "{}"),r[7],bool(r[8]))
