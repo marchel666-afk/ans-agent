@@ -16,6 +16,8 @@ class ModelCandidate:
     free: bool = False
     tool_capable: bool = False
     priority: int = 100
+    input_cost_per_million: float = 0.0
+    output_cost_per_million: float = 0.0
 
 @dataclass
 class AgentState:
