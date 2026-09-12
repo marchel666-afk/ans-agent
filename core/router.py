@@ -88,13 +88,30 @@ class ModelRouter:
  def score(self,m,role):
   s=self.stats.get(m.model,{"ok":0,"fail":0,"latency":0.0})
   role_b=self.benchmarks.get(m.provider+"/"+m.model,{}).get("roles",{}).get(role,{}).get("score")
-  if role_b is not None: return (100-role_b)*0.8 + m.priority - (25 if m.free else 0) - (20 if m.tool_capable else 0)
   success=s["ok"]/(s["ok"]+s["fail"]) if s["ok"]+s["fail"] else 0.5
   latency=min(s["latency"],120.0) if s["latency"] else 10.0
   role_bonus=0 if role in m.roles else 100
   free_bonus=-25 if m.free else 0
   tool_bonus=-20 if m.tool_capable else 0
+  # Role-specific production outcomes are the strongest signal once enough
+  # observations exist; Bayesian smoothing avoids overreacting to one task.
+  rs=self._role_outcome(m.model,role)
+  if rs["tasks"]>0:
+   n=rs["tasks"]
+   role_success=(rs["successes"]+2.0)/(n+4.0)
+   role_latency=rs["latency"] or latency
+   production=(1-role_success)*45 + min(role_latency,120.0)*0.20
+   if role_b is not None: production += (100-role_b)*0.25
+   return role_bonus + m.priority + free_bonus + tool_bonus + production
+  if role_b is not None:
+   return role_bonus + m.priority + free_bonus + tool_bonus + (100-role_b)*0.8
   return role_bonus + m.priority + free_bonus + tool_bonus + (1-success)*30 + latency*.25
+
+ def _role_outcome(self,model,role):
+  with sqlite3.connect(self.db) as c:
+   c.execute("CREATE TABLE IF NOT EXISTS task_outcomes(id INTEGER PRIMARY KEY AUTOINCREMENT,model TEXT,role TEXT,success INTEGER,latency REAL,tool_calls INTEGER,repairs INTEGER,cost REAL,created_at REAL)")
+   row=c.execute("SELECT COUNT(*),COALESCE(SUM(success),0),COALESCE(AVG(latency),0) FROM task_outcomes WHERE model=? AND role=?",(model,role)).fetchone()
+  return {"tasks":row[0],"successes":row[1],"latency":row[2]}
  def classify_failure(self,error):
   text=str(error).lower()
   if "weekly limit" in text or "weekly usage" in text or "resets " in text:
