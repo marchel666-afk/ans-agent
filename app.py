@@ -47,7 +47,14 @@ def guarded_path(path:str):
     return path
 
 @app.get("/health")
-def health(): return {"status":"ok","service":"ans-agent"}
+def health():
+    return {"status":"ok","service":"ans-agent","workspace":os.path.isdir(WORKSPACE),"github":github.enabled(),"jobs":"sqlite"}
+
+@app.get("/diagnostics")
+def diagnostics(_:None=Depends(auth)):
+    adapters=Orchestrator(router,WORKSPACE).adapters
+    checks={"workspace":os.path.isdir(WORKSPACE),"claude_code":bool(adapters.get("claude-code")),"openai":bool(adapters.get("openai")),"gemini":bool(adapters.get("gemini")),"openrouter":bool(adapters.get("openrouter")),"github":github.enabled(),"job_persistence":os.path.exists(jobs.db_path)}
+    return {"ok":checks["workspace"] and checks["claude_code"] and checks["job_persistence"],"checks":checks}
 
 @app.get("/profiles")
 def profiles_list(_:None=Depends(auth)): return profiles.all()
