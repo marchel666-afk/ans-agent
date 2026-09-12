@@ -108,13 +108,21 @@ class Orchestrator:
             executor=ToolExecutor(path)
             candidates=self.router.rank("executor",requires_tools=True)
             if not candidates: raise ProviderError("No executor model available")
-            m=candidates[0]; adapter=self.adapters.get(m.model) or self.adapters.get(m.provider)
-            if not adapter: raise ProviderError("Executor adapter unavailable: "+m.provider)
-            loop=ToolLoop(adapter,executor,emit=self.emit,approval=self.approval,session_id=self.session_id)
-            output=loop.run("TASK: "+task+"\nSTEP: "+node.title+"\nInspect the workspace and implement this step. Verify your changes.",max_steps=20)
+            output=None; errors=[]
+            for m in candidates:
+                adapter=self.adapters.get(m.model) or self.adapters.get(m.provider)
+                if not adapter: continue
+                try:
+                    loop=ToolLoop(adapter,executor,emit=self.emit,approval=self.approval,session_id=self.session_id)
+                    output=loop.run("TASK: "+task+"\nSTEP: "+node.title+"\nInspect the workspace and implement this step. Verify your changes.",max_steps=20)
+                    self.router.report_success(m)
+                    break
+                except Exception as e:
+                    self.router.report_failure(m); errors.append(f"{m.provider}: {str(e)[:160]}")
+            if output is None: raise ProviderError("All executor providers failed: "+"; ".join(errors))
             if git and branch and not output.startswith("APPROVAL_REQUIRED:"):
                 try: git.commit(path,"ANS: "+node.title[:60])
-                except Exception: pass
+                except Exception as e: self.emit("commit.failed",{"node":node.id,"error":str(e)})
             return {"output":output,"branch":branch,"path":path}
         results=graph.run_parallel(execute,max_workers=max_workers)
         if git:
@@ -127,6 +135,7 @@ class Orchestrator:
                     if check["clean"]:
                         try:
                             git.merge(branch)
+                            git.cleanup_merged()
                             self.emit("merge.completed",{"node":node.id,"branch":branch})
                         except Exception as e:
                             self.emit("merge.failed",{"node":node.id,"branch":branch,"error":str(e)})
