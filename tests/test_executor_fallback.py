@@ -7,10 +7,15 @@ def test_executor_provider_fallback(monkeypatch, tmp_path):
     class FakeAdapter:
         def __init__(self, text=None, error=None):
             self.text, self.error = text, error
-        def complete(self, *args, **kwargs):
+        def complete(self, prompt="", **kwargs):
             if self.error:
                 raise RuntimeError(self.error)
-            return type("R", (), {"text": self.text})()
+            text = self.text
+            if "Create an ordered implementation plan" in prompt:
+                text = "1. create file"
+            elif "Return PASS or FAIL first" in prompt:
+                text = "PASS"
+            return type("R", (), {"text": text})()
     class FakeLoop:
         def __init__(self, adapter, executor, **kwargs):
             self.adapter = adapter
