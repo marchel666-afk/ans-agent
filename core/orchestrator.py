@@ -35,7 +35,7 @@ class Orchestrator:
             if not adapter:
                 errors.append(f"{m.provider}: adapter unavailable"); continue
             try:
-                self.emit("provider.selected",m.provider+"/"+m.model,role=role)
+                self.emit("provider.selected",m.provider+"/"+m.model,role=role,policy=policy,budget=budget,score=self.router.score(m,role),estimated_cost=self.router.cost_estimate(m,4000,2000))
                 started=__import__("time").time()
                 result=adapter.complete(prompt,timeout=120,model=m.model,cwd=self.workspace)
                 elapsed=__import__("time").time()-started
@@ -96,7 +96,7 @@ class Orchestrator:
                         if manager: manager._save(job)
                     started=__import__("time").time()
                     try:
-                        self.emit("provider.selected",m.provider+"/"+m.model,role="executor",step=step,attempt=attempt_number)
+                        self.emit("provider.selected",m.provider+"/"+m.model,role="executor",step=step,attempt=attempt_number,policy=policy,budget=budget,score=self.router.score(m,"executor"),estimated_cost=self.router.cost_estimate(m,4000,2000))
                         loop=ToolLoop(adapter,executor,emit=self.emit,
                                       approval=self.approval,session_id=self.session_id)
                         output=loop.run(f"TASK: {task}\nSTEP: {step}\nInspect the workspace and implement this step. Verify your changes.",max_steps=20)
