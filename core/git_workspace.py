@@ -42,6 +42,22 @@ class GitWorkspaceManager:
         self._run("merge","--no-ff",branch,"-m",f"Merge agent branch {branch}")
         return self._run("rev-parse","HEAD")
 
+    def cleanup_merged(self, base=None):
+        base=base or self.current_branch()
+        rows=self._run("worktree","list","--porcelain").splitlines()
+        removed=[]
+        branches=[]
+        for i,line in enumerate(rows):
+            if line.startswith("branch refs/heads/ans/"):
+                b=line.split("refs/heads/",1)[1]
+                try:
+                    if self._run("merge-base","--is-ancestor",b,base) == "":
+                        subprocess.run(["git","worktree","remove","--force",str(self.root/b.removeprefix("ans/"))],cwd=self.repo,check=False)
+                        subprocess.run(["git","branch","-D",b],cwd=self.repo,check=False)
+                        removed.append(b)
+                except Exception: pass
+        return removed
+
     def remove(self,task_id,branch=None,delete_branch=True):
         safe=re.sub(r"[^a-zA-Z0-9._-]","-",task_id)
         path=self.root/safe
