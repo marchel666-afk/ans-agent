@@ -28,6 +28,18 @@ Self-hosted multi-model agent workspace inspired by modern agent workbenches.
 
 Open http://127.0.0.1:8080.
 
+## Production-ready runtime
+
+The worker queue persists job metadata in SQLite, supports cancellation and approval waiting states, and exposes `/health` for container orchestration. The web UI includes agent profiles, job status and Stop control. GitHub work is designed around isolated branches and draft PRs.
+
+### Profiles
+
+`developer`, `game_developer`, `researcher`, `budget`.
+
+### Run modes
+
+Use `Agent` for normal execution, `Autopilot` for higher autonomy, and `Best-of-N` when comparing independent solutions.
+
 The first protected API request asks for the token stored in `ANS_AUTH_TOKEN_FILE` (default `data/auth.token`).
 
 ## Production
