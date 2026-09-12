@@ -29,3 +29,5 @@ async function renderModelManager(){const ms=await(await api('/model-pool')).jso
 async function saveModel(i){const ms=await(await api('/model-pool')).json();const m=ms[i];const priority=Number($('pri'+i).value);await api('/model-pool/'+encodeURIComponent(m.provider)+'/'+encodeURIComponent(m.model),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({priority})});await renderModelManager();loadModelPool()}
 
 async function discoverModels(){const x=await(await api('/model-pool/discover',{method:'POST'})).json();add('DISCOVERY','OpenRouter: added '+(x.added||0)+' models');await renderModelManager();await loadModelPool()}
+
+async function loadLearning(){try{const rows=await(await api('/learning')).json();$('learning').innerHTML=rows.length?rows.map(r=>'<div class="model-row"><b>'+r.model+'</b> · '+r.role+' · '+(r.success_rate*100).toFixed(1)+'% · '+r.latency.toFixed(1)+'s · '+r.tasks+' tasks</div>').join(''):'No task history yet.'}catch(e){$('learning').textContent='Unavailable'}}
