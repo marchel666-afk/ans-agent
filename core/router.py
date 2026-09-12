@@ -70,7 +70,17 @@ class ModelRouter:
    free=[m for m in cs if m.free]
    if free: cs=free
   now=time.time()
-  return sorted([m for m in cs if self._available(m) and (max_cost is None or m.input_cost_per_million+m.output_cost_per_million<=max_cost)],key=lambda m:(self.failures.get(m.model,(0,0,""))[1]>now,self.score(m,role),self.failures.get(m.model,(0,0,""))[0]))
+  active=[]; expired=[]
+  for m in cs:
+   state=self.failures.get(m.model)
+   if state and state[1] <= now:
+    expired.append(m.model); self.failures.pop(m.model,None)
+   if self._available(m) and (max_cost is None or m.input_cost_per_million+m.output_cost_per_million<=max_cost):
+    active.append(m)
+  if expired:
+   with sqlite3.connect(self.db) as c:
+    for model in expired: c.execute("DELETE FROM provider_health WHERE model=?",(model,))
+  return sorted(active,key=lambda m:(self.failures.get(m.model,(0,0,""))[1]>now,self.score(m,role),self.failures.get(m.model,(0,0,""))[0]))
  def choose(self,role,*,requires_tools=False,prefer_free=False,max_cost=None):
   cs=self.rank(role,requires_tools,prefer_free,max_cost)
   if not cs: raise RuntimeError(f"No model available for role={role!r}")
