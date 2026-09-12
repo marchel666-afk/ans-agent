@@ -16,3 +16,6 @@ SQLite and the agent workspace are bind-mounted outside the container. Use `scri
 
 ## Security
 Do not expose port 8000 directly to the Internet. Keep secrets only in `.env`, protect the UI with an authentication layer before public deployment, and restrict the workspace to a dedicated project directory.
+
+## Healthcheck
+The container exposes `/health`; Docker restarts unhealthy services according to the configured policy.
