@@ -23,7 +23,12 @@ class ClaudeCodeAdapter:
             p=subprocess.run(cmd,cwd=kwargs.get("cwd"),text=True,capture_output=True,timeout=kwargs.get("timeout",180))
         except FileNotFoundError as e:
             raise ProviderError("Claude Code CLI not found. Install Claude Code and make 'claude' available in PATH.") from e
-        if p.returncode: raise ProviderError(p.stderr.strip() or f"claude exited with {p.returncode}")
+        if p.returncode:
+            error = (p.stderr or p.stdout).strip()
+            lower = error.lower()
+            if "weekly limit" in lower or "hit your weekly limit" in lower or "usage limit" in lower:
+                raise ProviderError("Claude Code weekly usage limit reached. Claude reports that the limit has been reached; wait for the reset or configure another provider.")
+            raise ProviderError(error or f"claude exited with {p.returncode}")
         return ProviderResponse(p.stdout.strip())
 
 class OpenAICompatibleAdapter:
