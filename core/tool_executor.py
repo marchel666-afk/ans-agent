@@ -2,6 +2,7 @@ from .tools import Workspace
 class ToolExecutor:
     def __init__(self,root): self.ws=Workspace(root); self.job=None; self.manager=None
     def execute(self,name,args):
+        if self.manager and hasattr(self.manager,"record_tool"): self.manager.record_tool(name,args)
         if name=="read_file": return {"ok":True,"content":self.ws.read(args["path"])}
         if name=="write_file": return {"ok":True,"path":self.ws.write(args["path"],args["content"])}
         if name=="list_files": return {"ok":True,"files":self.ws.list(args.get("path","."))}
