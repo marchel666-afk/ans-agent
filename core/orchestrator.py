@@ -5,6 +5,7 @@ from .config import load_dotenv
 from .tool_executor import ToolExecutor
 from .tool_loop import ToolLoop
 from .task_graph import TaskGraph
+from .git_workspace import GitWorkspaceManager
 
 class Orchestrator:
     def __init__(self,router=None,workspace="./workspace",emit=None,approval=None,session_id=None):
@@ -49,6 +50,8 @@ class Orchestrator:
         graph=TaskGraph(state.plan)
         self.emit("task.graph",graph.snapshot())
         if mode=="chat": return {"status":"completed","plan":[],"output":plan_text,"iterations":0}
+        if mode=="autopilot" and state.plan:
+            return self._run_parallel_graph(task,state,graph)
         while state.plan and state.iteration<state.max_iterations:
             step=state.plan[0]; state.iteration+=1
             self.emit("step.started",step,iteration=state.iteration)
@@ -85,3 +88,25 @@ class Orchestrator:
                 state.plan.append(state.plan.pop(0))
         state.status="completed" if not state.plan else "max_iterations"
         return {"status":state.status,"plan":state.plan,"completed":state.completed,"observations":state.observations,"iterations":state.iteration}
+
+    def _run_parallel_graph(self,task,state,graph,max_workers=3):
+        import os
+        git=GitWorkspaceManager(self.workspace) if os.path.exists(os.path.join(self.workspace,".git")) else None
+        def execute(node):
+            path=self.workspace; branch=None
+            if git:
+                w=git.create(node.id); path=w["path"]; branch=w["branch"]
+            executor=ToolExecutor(path)
+            candidates=self.router.rank("executor",requires_tools=True)
+            if not candidates: raise ProviderError("No executor model available")
+            m=candidates[0]; adapter=self.adapters.get(m.model) or self.adapters.get(m.provider)
+            if not adapter: raise ProviderError("Executor adapter unavailable: "+m.provider)
+            loop=ToolLoop(adapter,executor,emit=self.emit,approval=self.approval,session_id=self.session_id)
+            output=loop.run("TASK: "+task+"\nSTEP: "+node.title+"\nInspect the workspace and implement this step. Verify your changes.",max_steps=20)
+            if git and branch and not output.startswith("APPROVAL_REQUIRED:"):
+                try: git.commit(path,"ANS: "+node.title[:60])
+                except Exception: pass
+            return {"output":output,"branch":branch,"path":path}
+        results=graph.run_parallel(execute,max_workers=max_workers)
+        self.emit("task.graph.completed",graph.snapshot())
+        return {"status":"completed" if all(n.status=="done" for n in graph.nodes.values()) else "partial","plan":[],"completed":[n.title for n in graph.nodes.values() if n.status=="done"],"observations":results,"iterations":state.iteration}
