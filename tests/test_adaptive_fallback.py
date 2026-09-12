@@ -17,3 +17,16 @@ def test_timeout_fallback_prefers_non_anthropic():
   o=ModelCandidate("ollama","o",{"planner"},priority=2)
   rt=ModelRouter(ModelRegistry([a,o])); rt.db=d+"/r.db"
   assert rt.fallback_policy("timeout","planner")[0].provider!="anthropic"
+
+
+def test_circuit_opens_after_failure_and_recovers():
+ with tempfile.TemporaryDirectory() as d:
+  m=ModelCandidate("test","m",{"planner"},priority=1)
+  rt=ModelRouter(ModelRegistry([m])); rt.db=d+"/r.db"
+  rt.report_failure(m,backoff=60,error="weekly limit")
+  assert rt.circuit_view()["m"]["state"]=="open"
+  rt.failures["m"]=(rt.failures["m"][0],0,"weekly_limit")
+  rt.rank("planner")
+  assert rt.circuit_view()["m"]["state"]=="half-open"
+  rt.report_success(m)
+  assert rt.circuit_view()["m"]["state"]=="closed"
