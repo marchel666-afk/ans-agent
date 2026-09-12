@@ -62,7 +62,7 @@ Start with `Agent` mode. Use `Autopilot` only after verifying the workspace and 
 
 Read/list/Git inspection is low risk. File writes and terminal actions are approval-gated. Dangerous shell patterns are additionally blocked. Push/PR operations are intended to remain behind approval.
 
-The current MVP stops the active run when approval is required. Approving the request does not yet resume the exact suspended model turn; rerun the task after approval. This is intentional until resumable tool-call state is added.
+Approval is handled as a blocking gate inside the active worker. When the user approves, the worker resumes the pending tool call and continues the same task context. A server restart still requires a task retry if an in-memory worker was interrupted.
 
 ## 6. GitHub
 
