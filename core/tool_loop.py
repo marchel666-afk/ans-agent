@@ -5,6 +5,7 @@ class ToolLoop:
  def run(self,prompt,max_steps=20):
   current=prompt+"\n\n"+TOOLS
   for i in range(max_steps):
+   if getattr(getattr(self.executor,"job",None),"cancel_requested",False): return "CANCELLED_BY_USER"
    answer=self.adapter.complete(current).text.strip()
    try: obj=json.loads(next(x for x in answer.splitlines() if x.strip().startswith("{") and x.strip().endswith("}")))
    except Exception:return answer
