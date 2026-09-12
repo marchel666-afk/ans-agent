@@ -19,7 +19,7 @@ class ClaudeCodeAdapter:
     def complete(self,prompt,**kwargs):
         cmd=["claude","-p",prompt]
         try:
-            p=subprocess.run(cmd,text=True,capture_output=True,timeout=kwargs.get("timeout",180))
+            p=subprocess.run(cmd,cwd=kwargs.get("cwd"),text=True,capture_output=True,timeout=kwargs.get("timeout",180))
         except FileNotFoundError as e:
             raise ProviderError("Claude Code CLI not found. Install Claude Code and make 'claude' available in PATH.") from e
         if p.returncode: raise ProviderError(p.stderr.strip() or f"claude exited with {p.returncode}")
