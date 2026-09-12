@@ -48,6 +48,7 @@ class Orchestrator:
                               approval=self.approval,session_id=self.session_id)
                 job=getattr(self,"job",None)
                 executor.job=job
+                executor.manager=getattr(self,"job_manager",None)
                 output=loop.run(f"TASK: {task}\nSTEP: {step}\nInspect the workspace and implement this step. Verify your changes.",max_steps=20)
             except Exception as e:
                 output="EXECUTOR ERROR: "+str(e)
