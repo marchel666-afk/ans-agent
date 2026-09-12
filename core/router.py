@@ -152,3 +152,12 @@ class ModelRouter:
    if role: q+=" WHERE role=?"; args=(role,)
    q+=" GROUP BY model,role"; rows=c.execute(q,args).fetchall()
   return [{"model":r[0],"role":r[1],"tasks":r[2],"success_rate":round(r[3],3),"latency":round(r[4],3),"tool_calls":round(r[5],2),"repairs":round(r[6],2),"cost":round(r[7],6)} for r in rows]
+
+ def learning_view(self,role=None):
+  with sqlite3.connect(self.db) as c:
+   c.execute("CREATE TABLE IF NOT EXISTS task_outcomes(id INTEGER PRIMARY KEY AUTOINCREMENT,model TEXT,role TEXT,success INTEGER,latency REAL,tool_calls INTEGER,repairs INTEGER,cost REAL,created_at REAL)")
+   q="SELECT model,role,COUNT(*),AVG(success),AVG(latency),AVG(tool_calls),AVG(repairs),AVG(cost) FROM task_outcomes"; args=()
+   if role: q+=" WHERE role=?"; args=(role,)
+   q+=" GROUP BY model,role"
+   rows=c.execute(q,args).fetchall()
+  return [{"model":r[0],"role":r[1],"tasks":r[2],"success_rate":round(r[3],3),"latency":round(r[4],3),"tool_calls":round(r[5],2),"repairs":round(r[6],2),"cost":round(r[7],6)} for r in rows]
