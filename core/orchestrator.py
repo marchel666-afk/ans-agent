@@ -75,23 +75,33 @@ class Orchestrator:
                 executor.manager=getattr(self,"job_manager",None)
                 output=None
                 errors=[]
-                for m in candidates:
+                job=getattr(self,"job",None)
+                for attempt_number,m in enumerate(candidates,1):
                     adapter=self.adapters.get(m.model) or self.adapters.get(m.provider)
                     if not adapter:
                         errors.append(f"{m.provider}: adapter unavailable")
                         continue
+                    attempt={"number":attempt_number,"provider":m.provider,"model":m.model,"role":"executor","step":step,"started_at":__import__("time").time(),"status":"running"}
+                    if job is not None:
+                        job.attempts.append(attempt)
+                        manager=getattr(self,"job_manager",None)
+                        if manager: manager._save(job)
                     try:
-                        self.emit("provider.selected",m.provider+"/"+m.model,role="executor",step=step)
+                        self.emit("provider.selected",m.provider+"/"+m.model,role="executor",step=step,attempt=attempt_number)
                         loop=ToolLoop(adapter,executor,emit=self.emit,
                                       approval=self.approval,session_id=self.session_id)
                         output=loop.run(f"TASK: {task}\nSTEP: {step}\nInspect the workspace and implement this step. Verify your changes.",max_steps=20)
                         self.router.report_success(m)
+                        attempt.update({"status":"completed","finished_at":__import__("time").time()})
+                        if manager: manager._save(job)
                         break
                     except Exception as e:
                         error=str(e)[:180]
                         failure=self.router.report_failure(m,error=error)
+                        attempt.update({"status":"failed","finished_at":__import__("time").time(),"error":error,"category":failure["category"]})
+                        if manager: manager._save(job)
                         errors.append(f"{m.provider}: {error}")
-                        self.emit("provider.failed",error,provider=m.provider,model=m.model,role="executor",step=step,category=failure["category"],cooldown_seconds=failure["cooldown_seconds"])
+                        self.emit("provider.failed",error,provider=m.provider,model=m.model,role="executor",step=step,attempt=attempt_number,category=failure["category"],cooldown_seconds=failure["cooldown_seconds"])
                 if output is None:
                     raise ProviderError("All executor providers failed: "+"; ".join(errors))
             except Exception as e:
