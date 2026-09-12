@@ -67,6 +67,11 @@ def models(_:None=Depends(auth)):
              "available":bool(o.adapters.get(m.model) or o.adapters.get(m.provider))}
             for m in router.registry.models]
 
+@app.post("/model-pool/discover")
+def discover_models(_:None=Depends(auth)):
+    try: return router.discover_openrouter()
+    except Exception as e: raise HTTPException(502,str(e))
+
 @app.post("/model-pool/refresh")
 def refresh_model_pool(_:None=Depends(auth)): return router.refresh_free_pool()
 
