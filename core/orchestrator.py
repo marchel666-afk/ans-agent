@@ -16,7 +16,14 @@ class Orchestrator:
         self.session_id=session_id
 
     def call(self,role,prompt,prefer_free=False,tools=False):
-        candidates=self.router.rank(role,requires_tools=tools,prefer_free=prefer_free)
+        profile=getattr(self,"profile",None)
+        if profile:
+            mapped={"planner":profile.planner,"architect":profile.planner,"reviewer":profile.reviewer,"researcher":profile.researcher,"judge":profile.judge}
+            preferred=mapped.get(role)
+            candidates=self.router.rank(role,requires_tools=tools,prefer_free=prefer_free)
+            if preferred: candidates=sorted(candidates,key=lambda m: 0 if m.model==preferred or m.provider==preferred else 1)
+        else:
+            candidates=self.router.rank(role,requires_tools=tools,prefer_free=prefer_free)
         errors=[]
         for m in candidates:
             adapter=self.adapters.get(m.model) or self.adapters.get(m.provider)
