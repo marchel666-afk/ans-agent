@@ -116,3 +116,25 @@ class ModelRouter:
   key=provider+"/"+model
   self.benchmarks[key]={"score":score,"tests":results,"total_latency":round(total,3),"updated_at":time.time()}
   return {"provider":provider,"model":model,"score":score,"tests":results}
+
+ def role_benchmark(self,provider,model,adapter,role,timeout=45):
+  import time
+  suites={
+   "planner":[("planning","Design a concise implementation plan for a Telegram bot feature. Return 5 ordered steps.")],
+   "executor":[("coding","Write a robust Python function that validates an email and returns True or False. Code only.")],
+   "researcher":[("research","List 5 factual checks you would perform before answering a question about a company. Concise bullets.")],
+   "reviewer":[("review","Review this code: def add(a,b): return a+b. Give 2 useful review comments.")],
+   "judge":[("reasoning","Compare options A and B using cost=3,2 and quality=7,6. Which has better quality/cost? Show calculation.")],
+   "tool_agent":[("tool_use","Describe the JSON arguments you would pass to a tool named search with query='test'. Return JSON only.")]
+  }
+  tests=suites.get(role,suites["planner"]); results=[]
+  for name,prompt in tests:
+   t=time.time()
+   try:
+    r=adapter.complete(prompt,timeout=timeout); elapsed=time.time()-t; txt=r.text.strip()
+    passed=bool(txt) and (role!="tool_agent" or "query" in txt)
+    results.append({"test":name,"passed":passed,"latency":round(elapsed,3)})
+   except Exception as e: results.append({"test":name,"passed":False,"error":str(e)[:180]})
+  score=round(sum(x["passed"] for x in results)/len(results)*100,1)
+  key=provider+"/"+model; self.benchmarks.setdefault(key,{})["roles"]={**self.benchmarks.get(key,{}).get("roles",{}),role:{"score":score,"tests":results,"updated_at":time.time()}}
+  return {"provider":provider,"model":model,"role":role,"score":score,"tests":results}
