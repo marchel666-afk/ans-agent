@@ -4,6 +4,7 @@ from .types import AgentState, TaskMode
 from .config import load_dotenv
 from .tool_executor import ToolExecutor
 from .tool_loop import ToolLoop
+from .task_graph import TaskGraph
 
 class Orchestrator:
     def __init__(self,router=None,workspace="./workspace",emit=None,approval=None,session_id=None):
@@ -45,6 +46,8 @@ class Orchestrator:
         if profile: self.emit("profile.selected",profile.name,planner=profile.planner,executor=profile.executor,reviewer=profile.reviewer)
         plan_text=self.call("planner","Create an ordered implementation plan. Return one step per line.\n\nTASK:\n"+task)
         state.plan=[x.strip("- •0123456789.\t") for x in plan_text.splitlines() if x.strip()]
+        graph=TaskGraph(state.plan)
+        self.emit("task.graph",graph.snapshot())
         if mode=="chat": return {"status":"completed","plan":[],"output":plan_text,"iterations":0}
         while state.plan and state.iteration<state.max_iterations:
             step=state.plan[0]; state.iteration+=1
