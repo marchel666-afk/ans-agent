@@ -18,7 +18,7 @@ class Orchestrator:
         self.emit=emit or (lambda *a,**k:None)
         self.approval=approval
         self.session_id=session_id
-        self.memory=ProjectMemory(SessionStoreProxy(), "default") if False else None
+        self.memory=None
 
     def call(self,role,prompt,prefer_free=False,tools=False):
         profile=getattr(self,"profile",None)
