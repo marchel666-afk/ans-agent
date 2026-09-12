@@ -8,13 +8,13 @@ async function load(){try{const h=await fetch('/health');$('health').textContent
 async function loadFiles(){try{const x=await(await api('/workspace/files')).json();$('files').innerHTML=x.files.map(f=>'<div class="file" data-path="'+encodeURIComponent(f)+'">'+f+'</div>').join('');document.querySelectorAll('.file').forEach(el=>el.onclick=()=>openFile(decodeURIComponent(el.dataset.path)))}catch(e){$('files').textContent='Workspace unavailable'}}
 async function openFile(path){try{const x=await(await api('/workspace/file?path='+encodeURIComponent(path))).json();$('filename').textContent=x.path;$('filecontent').value=x.content}catch(e){$('filecontent').value='Unable to read file'}}
 async function loadGit(){try{$('git').textContent=(await(await api('/workspace/status')).json()).stdout||'Clean working tree'}catch(e){$('git').textContent='Workspace unavailable'}}
-async function loadDiff(){try{$('diff').textContent=(await(await api('/workspace/diff')).json()).diff||'No changes'}catch(e){$('diff').textContent='Workspace unavailable'}}
+async function loadDiff(){try{const x=await(await api('/workspace/diff')).json();const d=x.diff; $('diff').textContent=typeof d==='string'?(d||'No changes'):JSON.stringify(d,null,2)}catch(e){$('diff').textContent='Workspace unavailable'}}
 async function decide(allow){if(!currentSession)return;await api('/approvals/'+currentSession,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({allow})});$('approval').classList.add('hidden')}
 async function start(){const t=$('task').value.trim();if(!t)return;timeline.innerHTML='';$('runstatus').textContent='RUNNING';try{const r=await api('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task:t,mode:$('mode').value,max_iterations:30,profile:$('profile').value})});const x=await r.json();if(!r.ok)throw Error(x.detail||'run failed');currentSession=x.session_id;currentJob=x.job_id;connect(x.session_id);pollJob()}catch(e){add('ERROR',e.message);$('runstatus').textContent='FAILED'}}
 $('task').addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter')start()});
 load();loadFiles();loadGit();loadDiff();
 
-async function pollJob(){if(!currentJob)return;try{const x=await(await api('/jobs/'+currentJob)).json();$('runstatus').textContent=(x.status||'unknown').toUpperCase();if(['queued','running','waiting'].includes(x.status)){setTimeout(pollJob,1000)}}catch(e){}}
+async function pollJob(){if(!currentJob)return;try{const x=await(await api('/jobs/'+currentJob)).json();$('runstatus').textContent=(x.status||'unknown').toUpperCase();if(['queued','running','waiting'].includes(x.status)){setTimeout(pollJob,1000)}else if(x.status==='failed'){add('job.failed',x.error||'Job failed');$('runstatus').textContent='FAILED';load();loadFiles();loadGit();loadDiff()}else if(x.status==='completed'){load();loadFiles();loadGit();loadDiff()}}catch(e){}}
 async function cancelJob(){if(currentJob)await api('/jobs/'+currentJob+'/cancel',{method:'POST'});}
 
 function openSetup(){$('setupModal').classList.remove('hidden');runDiagnostics()}
