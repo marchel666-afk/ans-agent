@@ -43,6 +43,7 @@ class RunRequest(BaseModel):
     max_iterations:int=30
     session_id:str|None=None
     profile:str="developer"
+    timeout_seconds:int=3600
 class ApprovalRequest(BaseModel):
     allow:bool
 class BranchRequest(BaseModel): name:str
@@ -267,7 +268,7 @@ async def run(req:RunRequest,_:None=Depends(auth)):
             else: result=orch.run(req.task,req.mode,max(1,min(req.max_iterations,30)))
             emit("run.completed","Run completed",status=result.get("status","completed"))
             return result
-        job=jobs.submit(s.id,worker)
+        job=jobs.submit(s.id,worker,timeout_seconds=req.timeout_seconds)
         orch.job=job
         emit("job.created","Agent job queued",job_id=job.id)
         return {"session_id":s.id,"job_id":job.id,"status":job.status}
