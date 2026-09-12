@@ -8,12 +8,15 @@ from core.git import GitWorkspace
 from core.best_of_n import BestOfN
 from core.events import EventBus
 from core.tools import Workspace
-from core.approval import ApprovalManager\nfrom core.memory import ProjectMemory
+from core.approval import ApprovalManager
+from core.memory import ProjectMemory
+from core.github import GitHubService
 import asyncio, os
-app=FastAPI(title="ANS Agent"); router=ModelRouter(); sessions=SessionStore(); events=EventBus(); approvals=ApprovalManager(); WORKSPACE=os.getenv("ANS_WORKSPACE","./workspace")
+app=FastAPI(title="ANS Agent"); router=ModelRouter(); sessions=SessionStore(); events=EventBus(); approvals=ApprovalManager(); github=GitHubService(); WORKSPACE=os.getenv("ANS_WORKSPACE","./workspace")
 class RouteRequest(BaseModel): role:str; requires_tools:bool=False; prefer_free:bool=False
 class RunRequest(BaseModel): task:str; mode:str="agent"; max_iterations:int=30; session_id:str|None=None
 class ApprovalRequest(BaseModel): allow:bool
+class PRRequest(BaseModel): head:str; base:str|None=None; title:str; body:str=""; draft:bool=True
 @app.get("/health")
 def health(): return {"status":"ok","service":"ans-agent"}
 @app.get("/models")
@@ -23,7 +26,11 @@ def models():
 def route(req:RouteRequest): return router.choose(req.role,requires_tools=req.requires_tools,prefer_free=req.prefer_free).__dict__
 @app.get("/sessions")
 def list_sessions(): return [{"id":s.id,"task":s.task,"mode":s.mode,"events":len(s.events)} for s in sessions.list()]
-@app.get("/memory")\ndef get_memory(project:str="default"):\n return {"project":project,"memory":ProjectMemory(sessions,project).get_context()}\n@app.post("/memory")\nasync def save_memory(project:str,key:str,value:str):\n ProjectMemory(sessions,project).remember(key,value); return {"ok":True}\n@app.get("/sessions/{sid}")
+@app.get("/memory")
+def get_memory(project:str="default"): return {"project":project,"memory":ProjectMemory(sessions,project).get_context()}
+@app.post("/memory")
+async def save_memory(project:str,key:str,value:str): ProjectMemory(sessions,project).remember(key,value); return {"ok":True}
+@app.get("/sessions/{sid}")
 def get_session(sid:str):
  s=sessions.get(sid)
  if not s: raise HTTPException(404,"session not found")
@@ -33,6 +40,21 @@ def get_approval(sid:str): return approvals.pending.get(sid)
 @app.post("/approvals/{sid}")
 def decide_approval(sid:str,req:ApprovalRequest):
  item=approvals.decide(sid,req.allow); return {"ok":True,"approved":bool(item)}
+@app.get("/github")
+def github_config(): return github.config()
+@app.get("/github/branches")
+def github_branches():
+ try:return github.branches()
+ except Exception as e: raise HTTPException(502,str(e))
+@app.get("/github/pulls")
+def github_pulls(state:str="open"):
+ try:return github.pulls(state)
+ except Exception as e: raise HTTPException(502,str(e))
+@app.post("/github/pull")
+def github_pull(req:PRRequest):
+ if not approvals.request("github-pr","create_pull_request",{"head":req.head,"base":req.base or github.config()["default_branch"],"title":req.title}): return {"status":"approval_required"}
+ try:return github.create_pr(req.head,req.base or github.config()["default_branch"],req.title,req.body,req.draft)
+ except Exception as e: raise HTTPException(502,str(e))
 @app.get("/workspace/files")
 def workspace_files(): return {"files":Workspace(WORKSPACE).list()}
 @app.get("/workspace/file")
