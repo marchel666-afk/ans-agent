@@ -29,7 +29,8 @@ class SessionStore:
     s.events.append({"ts":e["ts"],"kind":e["kind"],"message":e["message"],**json.loads(e["data"] or "{}")})
    return s
  def emit(self,sid,kind,message,**data):
-  with self._db() as c:c.execute("INSERT INTO events(session_id,ts,kind,message,data) VALUES(?,?,?,?,?)",(sid,time.time(),kind,message,json.dumps(data,ensure_ascii=False)))
+  if not isinstance(message,str): message=json.dumps(message,ensure_ascii=False,default=str)
+  with self._db() as c:c.execute("INSERT INTO events(session_id,ts,kind,message,data) VALUES(?,?,?,?,?)",(sid,time.time(),kind,message,json.dumps(data,ensure_ascii=False,default=str)))
  def save_memory(self,project,key,value):
   with self._db() as c:c.execute("INSERT INTO memories(project,key,value,updated_at) VALUES(?,?,?,?) ON CONFLICT(project,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(project,key,value,time.time()))
  def memories(self,project):

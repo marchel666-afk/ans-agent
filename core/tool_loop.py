@@ -1,24 +1,82 @@
-import json
-TOOLS='Available tools:\n- read_file {path}\n- write_file {path,content}\n- list_files {path?}\n- terminal {command,timeout?}\n- git_status {}\n- git_diff {}\nWhen a tool is needed, output exactly one JSON line.'
+import json, re
+
+TOOLS = (
+    "You are an autonomous agent working inside a sandboxed project workspace.\n"
+    "Available tools (call ONE per step by outputting a single JSON line):\n"
+    "- read_file {path}\n"
+    "- write_file {path, content}\n"
+    "- list_files {path?}\n"
+    "- search {query, path?}\n"
+    "- terminal {command, timeout?}\n"
+    "- git_status {}\n- git_diff {}\n- git_log {}\n"
+    "- finish {summary}   # call when the step is complete; summary is the result\n"
+    "Rules: think briefly, then output exactly one JSON line like "
+    '{\"tool\":\"read_file\",\"args\":{\"path\":\"app.py\"}}. '
+    "Use the tool results in PROGRESS to decide the next action. "
+    "When the task is done, call finish with a concise summary of what you did."
+)
+
+
+def _extract_json(text):
+    """Pull the first parseable JSON object out of a model response."""
+    for line in text.splitlines():
+        line = line.strip().strip("`").strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                return json.loads(line)
+            except Exception:
+                pass
+    m = re.search(r"\{.*\}", text, re.S)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+    return None
+
+
 class ToolLoop:
- def __init__(self,adapter,executor,emit=None,approval=None,session_id=None): self.adapter=adapter; self.executor=executor; self.emit=emit or (lambda *a,**k:None); self.approval=approval; self.session_id=session_id
- def run(self,prompt,max_steps=20):
-  current=prompt+"\n\n"+TOOLS
-  for i in range(max_steps):
-   if getattr(getattr(self.executor,"job",None),"cancel_requested",False): return "CANCELLED_BY_USER"
-   answer=self.adapter.complete(current,cwd=str(self.executor.ws.root)).text.strip()
-   try: obj=json.loads(next(x for x in answer.splitlines() if x.strip().startswith("{") and x.strip().endswith("}")))
-   except Exception:return answer
-   if "tool" not in obj:return answer
-   name,args=obj["tool"],obj.get("args",{})
-   if self.approval and not self.approval.request(self.session_id,name,args):
-    self.emit("approval.waiting",f"Waiting for approval: {name}",tool=name,args=args)
-    if hasattr(self.executor,"job") and self.executor.job: self.executor.manager.set_waiting(self.executor.job)
-    if not self.approval.wait_for(self.session_id,name,args): return "APPROVAL_DENIED_OR_TIMEOUT: "+name
-    if hasattr(self.executor,"job") and self.executor.job: self.executor.manager.set_running(self.executor.job)
-   self.emit("tool.call",name,args=args)
-   try: result=self.executor.execute(name,args)
-   except Exception as e: result={"ok":False,"error":str(e)}
-   self.emit("tool.result",name,result=result)
-   current=prompt+"\n\n"+TOOLS+"\n\nTOOL RESULT:\n"+json.dumps(result,ensure_ascii=False)[:20000]
-  return "Tool loop stopped at maximum steps."
+    def __init__(self, adapter, executor, emit=None, approval=None, session_id=None):
+        self.adapter = adapter
+        self.executor = executor
+        self.emit = emit or (lambda *a, **k: None)
+        self.approval = approval
+        self.session_id = session_id
+
+    def run(self, prompt, max_steps=20):
+        system = prompt + "\n\n" + TOOLS
+        transcript = []  # accumulated step history so the agent remembers its work
+        for i in range(max_steps):
+            if getattr(getattr(self.executor, "job", None), "cancel_requested", False):
+                return "CANCELLED_BY_USER"
+            convo = system
+            if transcript:
+                convo += "\n\nPROGRESS SO FAR:\n" + "\n".join(transcript[-40:])
+            convo += "\n\nNext action (one JSON line), or finish when done:"
+            answer = self.adapter.complete(convo, cwd=str(self.executor.ws.root)).text.strip()
+            obj = _extract_json(answer)
+            if not obj or "tool" not in obj:
+                # No tool call -> treat the plain answer as the final result.
+                return answer
+            name, args = obj["tool"], obj.get("args", {}) or {}
+            if name in ("finish", "done", "final"):
+                return args.get("summary") or args.get("result") or args.get("text") or "Task step completed."
+            if self.approval and not self.approval.request(self.session_id, name, args):
+                self.emit("approval.waiting", f"Waiting for approval: {name}", tool=name, args=args)
+                if getattr(self.executor, "job", None) and self.executor.manager:
+                    self.executor.manager.set_waiting(self.executor.job)
+                if not self.approval.wait_for(self.session_id, name, args):
+                    return "APPROVAL_DENIED_OR_TIMEOUT: " + name
+                if getattr(self.executor, "job", None) and self.executor.manager:
+                    self.executor.manager.set_running(self.executor.job)
+            self.emit("tool.call", name, args=args)
+            try:
+                result = self.executor.execute(name, args)
+            except Exception as e:
+                result = {"ok": False, "error": str(e)}
+            self.emit("tool.result", name, result=result)
+            transcript.append(
+                f"STEP {i+1}: {name}({json.dumps(args, ensure_ascii=False)[:400]}) -> "
+                + json.dumps(result, ensure_ascii=False)[:1500]
+            )
+        return "Reached maximum steps. Progress:\n" + "\n".join(transcript[-6:])

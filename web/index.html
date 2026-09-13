@@ -10,11 +10,11 @@
 <aside class="sidebar">
   <div class="brand">ANS <small>AGENT</small></div>
   <div class="section">WORKSPACE</div>
-  <button class="nav active" data-view="chat">◇ Chat</button>
-  <button class="nav" data-view="agent">◈ Agent</button>
-  <button class="nav" data-view="arena">⚔ Arena</button>
+  <button class="nav active" data-view="agent">◈ Agent</button>
+  <button class="nav" data-view="chat">◇ Chat</button>
+  <button class="nav" data-view="workspace">◫ Workspace</button>
   <button class="nav" data-view="models">◉ Models</button>
-  <button class="nav" data-view="sessions">◫ Sessions</button>
+  <button class="nav" data-view="sessions">☰ Sessions</button>
   <div class="section">RECENT</div>
   <div id="sessions" class="recent"></div>
 </aside>
@@ -23,7 +23,7 @@
   <header>
     <div>
       <div class="eyebrow">WORKSPACE / ANS</div>
-      <h1 id="viewTitle">Chat</h1>
+      <h1 id="viewTitle">Agent</h1>
     </div>
     <div class="head-actions">
       <span id="health" class="status">● CONNECTING</span>
@@ -31,14 +31,39 @@
     </div>
   </header>
 
-  <!-- ===================== CHAT ===================== -->
-  <section class="view" data-view="chat">
+  <!-- ===================== AGENT (conversational) ===================== -->
+  <section class="view" data-view="agent">
+    <div class="chat-wrap">
+      <div class="chat-bar">
+        <select id="agentMode" title="Режим"><option value="agent">Agent</option><option value="autopilot">Autopilot</option></select>
+        <select id="policy" title="Политика роутинга"><option value="balanced">Balanced</option><option value="cheap">Cheap</option><option value="quality">Quality</option></select>
+        <select id="profile" title="Профиль"><option value="developer">Developer</option><option value="game_developer">Game Dev</option><option value="researcher">Researcher</option><option value="budget">Budget</option></select>
+        <input id="budget" type="number" min="0" step="0.01" placeholder="$ budget">
+        <span id="runstatus" class="status">IDLE</span>
+        <button class="mini" onclick="cancelJob()">Stop</button>
+        <button class="mini" onclick="newAgent()">New</button>
+      </div>
+      <div id="agentThread" class="chat-thread"><div class="empty">Опиши задачу — агент спланирует, выполнит её инструментами (файлы, терминал, git, поиск) и покажет ход работы в реальном времени.</div></div>
+      <div class="chat-input">
+        <textarea id="agentInput" rows="1" placeholder="Что построить, починить, исследовать?  (Enter — запуск, Shift+Enter — перенос)"></textarea>
+        <button class="primary" id="agentSend" onclick="startAgent()">Run</button>
+      </div>
+    </div>
+    <div id="approval" class="approval hidden">
+      <div class="approval-title">ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ</div>
+      <div id="approvalText"></div>
+      <div class="approval-actions"><button onclick="decide(false)">Отклонить</button><button class="primary" onclick="decide(true)">Разрешить</button></div>
+    </div>
+  </section>
+
+  <!-- ===================== CHAT (direct model) ===================== -->
+  <section class="view" data-view="chat" hidden>
     <div class="chat-wrap">
       <div class="chat-bar">
         <select id="chatModel"><option value="">Auto (router)</option></select>
         <button class="mini" onclick="newChat()">New chat</button>
       </div>
-      <div id="chatThread" class="chat-thread"><div class="empty">Начни диалог — выбери модель или оставь Auto.</div></div>
+      <div id="chatThread" class="chat-thread"><div class="empty">Прямой чат с выбранной моделью (без инструментов).</div></div>
       <div class="chat-input">
         <textarea id="chatInput" rows="1" placeholder="Спроси что угодно…  (Enter — отправить, Shift+Enter — перенос)"></textarea>
         <button class="primary" id="chatSend" onclick="sendChat()">Send</button>
@@ -46,28 +71,22 @@
     </div>
   </section>
 
-  <!-- ===================== AGENT ===================== -->
-  <section class="view" data-view="agent" hidden>
-    <div class="agent-controls">
-      <select id="profile"><option value="developer">Developer</option><option value="game_developer">Game Developer</option><option value="researcher">Researcher</option><option value="budget">Budget</option></select>
-      <select id="policy"><option value="balanced">Balanced</option><option value="cheap">Cheap</option><option value="quality">Quality</option></select>
-      <input id="budget" type="number" min="0" step="0.01" placeholder="$ budget">
-      <select id="mode"><option value="agent">Agent</option><option value="autopilot">Autopilot</option><option value="best_of_n">Best of N</option><option value="chat">Chat (single model)</option></select>
-    </div>
+  <!-- ===================== WORKSPACE (inspect) ===================== -->
+  <section class="view" data-view="workspace" hidden>
     <div class="layout">
       <section class="center">
-        <div class="card task">
-          <div class="card-head"><span>TASK</span><span class="hint">Опиши результат</span></div>
-          <textarea id="task" placeholder="Что ANS должен построить, починить, исследовать или улучшить?"></textarea>
-          <div class="task-foot"><span>Ctrl + Enter — запустить</span><button class="primary" onclick="start()">Run Agent</button></div>
-        </div>
-        <div class="card run">
-          <div class="card-head"><span>LIVE RUN</span><span id="runstatus" class="status">IDLE</span><button class="mini" onclick="cancelJob()">Stop</button></div>
-          <div id="timeline" class="timeline"><div class="empty">Активность агента появится здесь.</div></div>
-        </div>
         <div class="card">
           <div class="card-head"><span>DIFF</span><button class="mini" onclick="loadDiff()">Refresh</button></div>
           <pre id="diff">No diff loaded.</pre>
+        </div>
+        <div class="card">
+          <div class="card-head"><span>GIT</span><button class="mini" onclick="loadGit()">Refresh</button></div>
+          <pre id="git">Loading…</pre>
+        </div>
+        <div class="card">
+          <div class="card-head"><span>ADAPTIVE LEARNING</span><button class="mini" onclick="loadLearning()">Refresh</button></div>
+          <div id="learning">No task history yet.</div>
+          <div id="circuitBreakers" class="circuit-breakers"><div class="hint">Circuit breakers</div></div>
         </div>
       </section>
       <aside class="right">
@@ -79,43 +98,14 @@
           <div class="card-head"><span id="filename">FILE</span></div>
           <textarea id="filecontent" readonly>Select a file</textarea>
         </div>
-        <div class="card">
-          <div class="card-head"><span>ADAPTIVE LEARNING</span><button class="mini" onclick="loadLearning()">Refresh</button></div>
-          <div id="learning">No task history yet.</div>
-        </div>
-        <div class="card">
-          <div class="card-head"><span>TASK GRAPH</span></div>
-          <div id="taskGraph">Graph appears when an agent run starts.</div>
-          <div id="circuitBreakers" class="circuit-breakers"><div class="hint">Circuit breakers</div></div>
-        </div>
-        <div class="card">
-          <div class="card-head"><span>GIT</span><button class="mini" onclick="loadGit()">Refresh</button></div>
-          <pre id="git">Loading…</pre>
-        </div>
       </aside>
     </div>
-    <div id="approval" class="approval hidden">
-      <div class="approval-title">APPROVAL REQUIRED</div>
-      <div id="approvalText"></div>
-      <div class="approval-actions"><button onclick="decide(false)">Deny</button><button class="primary" onclick="decide(true)">Allow</button></div>
-    </div>
-  </section>
-
-  <!-- ===================== ARENA ===================== -->
-  <section class="view" data-view="arena" hidden>
-    <div class="card">
-      <div class="card-head"><span>ARENA — сравнение моделей</span><span class="hint">Один промпт → несколько моделей</span></div>
-      <div id="arenaPick" class="arena-pick"></div>
-      <textarea id="arenaPrompt" placeholder="Промпт для сравнения…"></textarea>
-      <div class="task-foot"><span>Отметь 2–4 модели</span><button class="primary" onclick="runArena()">Сравнить</button></div>
-    </div>
-    <div id="arenaGrid" class="arena-grid"></div>
   </section>
 
   <!-- ===================== MODELS ===================== -->
   <section class="view" data-view="models" hidden>
     <div class="card">
-      <div class="card-head"><span>MODEL POOL</span><span><button class="mini" onclick="refreshModels()">Refresh</button> <button class="mini" onclick="discoverModels()">Discover OpenRouter</button></span></div>
+      <div class="card-head"><span>MODEL POOL — распределение по ролям</span><span><button class="mini" onclick="refreshModels()">Refresh</button> <button class="mini" onclick="discoverModels()">Discover OpenRouter</button></span></div>
       <div id="models">Loading…</div>
       <div id="modelManager" class="model-manager"></div>
     </div>
