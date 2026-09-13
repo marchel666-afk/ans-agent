@@ -16,6 +16,9 @@ from core.jobs import JobManager
 from core.security import get_token
 from core.profiles import ProfileRegistry
 import asyncio, os, subprocess
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app=FastAPI(title="ANS Agent")
 app.mount("/web", StaticFiles(directory="web"), name="web")
