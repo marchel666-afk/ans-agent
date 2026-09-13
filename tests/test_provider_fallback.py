@@ -46,6 +46,21 @@ def test_ollama_alias_resolves_first_local_model(monkeypatch):
     assert calls == ["http://ollama.test/api/tags", "http://ollama.test/api/chat"]
 
 
+def test_ollama_alias_uses_no_proxy_opener(monkeypatch):
+    adapter = OllamaAdapter("http://ollama.test", "qwen3:8b")
+    class FakeResponse:
+        def read(self): return json.dumps({"message":{"content":"OK"}}).encode()
+        def __enter__(self): return self
+        def __exit__(self,*args): pass
+    calls=[]
+    def fake_open(req,timeout=0):
+        calls.append(req.full_url)
+        return FakeResponse()
+    monkeypatch.setattr(adapter.opener,"open",fake_open)
+    assert adapter.complete("test",model="local").text=="OK"
+    assert calls==["http://ollama.test/api/chat"]
+
+
 def test_ollama_is_tool_capable_fallback_candidate():
     registry = ModelRegistry.default()
     m = next(x for x in registry.models if x.provider == "ollama")
