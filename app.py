@@ -49,6 +49,7 @@ class RunRequest(BaseModel):
     timeout_seconds:int=3600
     policy:str="balanced"
     budget:float|None=None
+    workspace:str|None=None
 class ApprovalRequest(BaseModel):
     allow:bool
 class ChatRequest(BaseModel):
@@ -315,11 +316,16 @@ async def run(req:RunRequest,_:None=Depends(auth)):
     if not req.task.strip(): raise HTTPException(400,"task is required")
     if req.mode not in {"chat","agent","autopilot","best_of_n"}: raise HTTPException(400,"invalid mode")
     s=sessions.get(req.session_id) if req.session_id else sessions.create(req.task,req.mode)
+    run_ws=WORKSPACE
+    if req.workspace:
+        safe="/".join(p for p in req.workspace.strip().replace("\\","/").split("/") if p not in ("","..","."))
+        if safe:
+            run_ws=os.path.join(WORKSPACE,safe); os.makedirs(run_ws,exist_ok=True)
     def emit(k,m,**d):
         item={"kind":k,"message":m,**d}; s.emit(k,m,**d); sessions.emit(s.id,k,m,**d); events.publish(s.id,item)
-    emit("run.started","Task accepted",mode=req.mode,policy=req.policy,budget=req.budget)
+    emit("run.started","Task accepted",mode=req.mode,policy=req.policy,budget=req.budget,workspace=os.path.relpath(run_ws,WORKSPACE) if run_ws!=WORKSPACE else ".")
     try:
-        orch=Orchestrator(router,WORKSPACE,emit=emit,approval=approvals,session_id=s.id)
+        orch=Orchestrator(router,run_ws,emit=emit,approval=approvals,session_id=s.id)
         orch.memory=ProjectMemory(sessions, "default")
         orch.job_manager=jobs
         profile=profiles.get(req.profile)

@@ -60,3 +60,4 @@ main{display:block}
 .final-bad{color:#e77b7b;font-weight:650}
 .final-steps{color:#b7c3cf;font-size:13px;line-height:1.6}
 .final-obs{margin-top:8px}.final-obs summary{cursor:pointer;color:#8c96a2;font-size:11px}
+.final-summary{color:#e6ebf1;line-height:1.55;margin-bottom:10px;padding:10px 12px;background:#12161b;border:1px solid #23303a;border-left:3px solid #4a90d9;border-radius:8px}

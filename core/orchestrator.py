@@ -57,6 +57,17 @@ class Orchestrator:
                 candidates=self.router.fallback_policy(failure["category"],role,policy,exclude=tried)
         raise ProviderError("No available provider: "+"; ".join(errors))
 
+    def _cancelled(self):
+        return bool(getattr(getattr(self,"job",None),"cancel_requested",False))
+
+    def _summarize(self,task,state):
+        if state.status=="cancelled": return "Остановлено пользователем."
+        if not state.observations: return ""
+        try:
+            return self.call("reviewer","Кратко и связно суммируй для пользователя, что сделано по задаче (3–6 предложений, по делу, без воды). Если задача не завершена — честно скажи, что осталось.\n\nЗАДАЧА:\n"+task+"\n\nХОД РАБОТЫ:\n"+"\n".join(state.observations[-16:]))
+        except Exception:
+            return ""
+
     def run(self,task,mode="agent",max_iterations=30,policy="balanced",budget=None):
         original_task=task
         self.policy=policy
@@ -75,6 +86,8 @@ class Orchestrator:
         if mode=="autopilot" and state.plan:
             return self._run_parallel_graph(task,state,graph)
         while state.plan and state.iteration<state.max_iterations:
+            if self._cancelled():
+                state.status="cancelled"; break
             step=state.plan[0]; state.iteration+=1
             self.emit("step.started",step,iteration=state.iteration)
             try:
@@ -131,6 +144,8 @@ class Orchestrator:
             except Exception as e:
                 output="EXECUTOR ERROR: "+str(e)
             self.emit("executor.report",output,step=step)
+            if output=="CANCELLED_BY_USER":
+                return {"status":"cancelled","plan":state.plan,"completed":state.completed,"observations":state.observations,"iterations":state.iteration,"summary":"Остановлено пользователем."}
             if output.startswith("APPROVAL_REQUIRED:"):
                 state.status="approval_required"
                 return {"status":state.status,"plan":state.plan,"completed":state.completed,"observations":state.observations,"iterations":state.iteration}
@@ -148,8 +163,10 @@ class Orchestrator:
                 state.plan.append(state.plan.pop(0))
         if self.memory and state.completed:
             self.memory.remember_result(original_task, "\n".join(state.observations[-8:]))
-        state.status="completed" if not state.plan else "max_iterations"
-        return {"status":state.status,"plan":state.plan,"completed":state.completed,"observations":state.observations,"iterations":state.iteration}
+        if state.status!="cancelled":
+            state.status="completed" if not state.plan else "max_iterations"
+        summary=self._summarize(original_task,state)
+        return {"status":state.status,"plan":state.plan,"completed":state.completed,"observations":state.observations,"iterations":state.iteration,"summary":summary}
 
     def _run_parallel_graph(self,task,state,graph,max_workers=3):
         import os

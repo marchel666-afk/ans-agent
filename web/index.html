@@ -39,6 +39,7 @@
         <select id="policy" title="Политика роутинга"><option value="balanced">Balanced</option><option value="cheap">Cheap</option><option value="quality">Quality</option></select>
         <select id="profile" title="Профиль"><option value="developer">Developer</option><option value="game_developer">Game Dev</option><option value="researcher">Researcher</option><option value="budget">Budget</option></select>
         <input id="budget" type="number" min="0" step="0.01" placeholder="$ budget">
+        <input id="agentWorkspace" placeholder="workspace (опц.)" title="Отдельная папка задачи внутри workspace">
         <span id="runstatus" class="status">IDLE</span>
         <button class="mini" onclick="cancelJob()">Stop</button>
         <button class="mini" onclick="newAgent()">New</button>

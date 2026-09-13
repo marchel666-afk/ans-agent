@@ -9,6 +9,8 @@ TOOLS = (
     "- append_file {path, content}\n"
     "- list_files {path?}\n"
     "- search {query, path?}\n"
+    "- web_search {query, limit?}   # search the web\n"
+    "- web_fetch {url}   # download a web page as text\n"
     "- terminal {command, timeout?}\n"
     "- git_status {}\n- git_diff {}\n- git_log {}\n"
     "- finish {summary}   # call when the step is complete; summary is the result\n"
