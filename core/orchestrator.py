@@ -78,7 +78,7 @@ class Orchestrator:
             task="PROJECT MEMORY:\n"+context+"\n\nTASK:\n"+task
         profile=getattr(self,"profile",None)
         if profile: self.emit("profile.selected",profile.name,planner=profile.planner,executor=profile.executor,reviewer=profile.reviewer)
-        plan_text=self.call("planner","Create an ordered implementation plan. Return one step per line.\n\nTASK:\n"+task)
+        plan_text=self.call("planner","Составь пошаговый план выполнения задачи. Одна строка — один конкретный шаг, без нумерации и лишних слов. Отвечай по-русски.\n\nЗАДАЧА:\n"+task)
         state.plan=[x.strip("- •0123456789.\t") for x in plan_text.splitlines() if x.strip()]
         graph=TaskGraph(state.plan)
         self.emit("task.graph",graph.snapshot())
@@ -123,7 +123,7 @@ class Orchestrator:
                         self.emit("provider.selected",m.provider+"/"+m.model,role="executor",step=step,attempt=attempt_number,policy=policy,budget=budget,score=self.router.score(m,"executor"),estimated_cost=self.router.cost_estimate(m,4000,2000))
                         loop=ToolLoop(adapter,executor,emit=self.emit,
                                       approval=self.approval,session_id=self.session_id)
-                        output=loop.run(f"TASK: {task}\nSTEP: {step}\nInspect the workspace and implement this step. Verify your changes.",max_steps=20)
+                        output=loop.run(f"ЗАДАЧА: {task}\nШАГ: {step}\nИзучи рабочую область и выполни этот шаг с помощью инструментов. Проверь результат.",max_steps=20)
                         elapsed=__import__("time").time()-started
                         self.router.report_success(m)
                         self.router.record_task(m,"executor",True,elapsed)
@@ -149,13 +149,13 @@ class Orchestrator:
             if output.startswith("APPROVAL_REQUIRED:"):
                 state.status="approval_required"
                 return {"status":state.status,"plan":state.plan,"completed":state.completed,"observations":state.observations,"iterations":state.iteration}
-            review=self.call("reviewer",f"Task: {task}\nStep: {step}\nExecutor report:\n{output}\n\nReturn PASS or FAIL first, then concrete reasoning.")
+            review=self.call("reviewer",f"Задача: {task}\nШаг: {step}\nОтчёт исполнителя:\n{output}\n\nОцени, выполнен ли шаг. ПЕРВЫМ словом напиши строго PASS (если выполнено) или FAIL (если нет), затем с новой строки — краткое обоснование по-русски.")
             self.emit("review",review,step=step)
             state.observations.extend([f"STEP {state.iteration}: {step}",output,review])
             if review.strip().upper().startswith("PASS"):
                 state.completed.append(step); state.plan.pop(0); self.emit("step.passed",step)
             elif mode=="agent":
-                repair=self.call("fixer",f"Task: {task}\nStep: {step}\nReview failure:\n{review}\nExecutor report:\n{output}\nFix the issue and return a concise repair plan.",tools=False)
+                repair=self.call("fixer",f"Задача: {task}\nШаг: {step}\nЗамечания проверки:\n{review}\nОтчёт исполнителя:\n{output}\nПредложи, как исправить проблему — кратким планом по-русски.",tools=False)
                 self.emit("repair.requested",repair,step=step)
                 state.plan.insert(0,step)
                 if state.iteration>=state.max_iterations: break

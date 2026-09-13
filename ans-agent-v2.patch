@@ -1,0 +1,1174 @@
+diff --git a/.env.example b/.env.example
+index 93af40b..c219376 100644
+--- a/.env.example
++++ b/.env.example
+@@ -7,6 +7,9 @@
+ # Bind the UI port ONLY to your VPN interface IP so it is reachable only through
+ # the VPN (e.g. 10.8.0.1 or 10.66.66.1). 127.0.0.1 = localhost only (SSH tunnel).
+ ANS_BIND=127.0.0.1
++# Host port published on ANS_BIND (container always serves 8080 internally).
++# 8899 avoids clashing with panels commonly on 8080.
++ANS_HOST_PORT=8899
+ ANS_HOST=0.0.0.0
+ ANS_PORT=8080
+ 
+@@ -15,13 +18,27 @@ ANS_PORT=8080
+ OLLAMA_BASE_URL=http://127.0.0.1:11434
+ OLLAMA_MODEL=llama3.2
+ 
+-# --- API providers (optional; give the router premium/faster options) ---
++# --- API providers (optional; give the router premium/faster/free options) ---
++# OpenRouter — ONE key unlocks Claude, GPT, Gemini + dozens of FREE models (:free).
++# Recommended fastest path to good answers. Get a key: https://openrouter.ai/keys
++OPENROUTER_API_KEY=
++OPENROUTER_MODEL=openrouter/free
++
++# Groq — FREE tier, extremely fast. https://console.groq.com/keys
++GROQ_API_KEY=
++GROQ_MODEL=llama-3.3-70b-versatile
++
++# Anthropic (Claude) native API. https://console.anthropic.com/
++ANTHROPIC_API_KEY=
++ANTHROPIC_MODEL=claude-sonnet-4-5
++
++# OpenAI (GPT). https://platform.openai.com/api-keys
+ OPENAI_API_KEY=
+ OPENAI_MODEL=gpt-5
++
++# Google Gemini (has a generous free tier). https://aistudio.google.com/apikey
+ GEMINI_API_KEY=
+ GEMINI_MODEL=gemini-2.5-flash
+-OPENROUTER_API_KEY=
+-OPENROUTER_MODEL=openrouter/free
+ 
+ # --- GitHub (optional) ---
+ GITHUB_TOKEN=
+diff --git a/.gitattributes b/.gitattributes
+new file mode 100644
+index 0000000..8c88961
+--- /dev/null
++++ b/.gitattributes
+@@ -0,0 +1,5 @@
++*.js text
++*.html text
++*.css text
++*.py text
++*.md text
+diff --git a/app.py b/app.py
+index aeeb543..69e3ff3 100644
+--- a/app.py
++++ b/app.py
+@@ -79,8 +79,10 @@ def startup(_:None=Depends(auth)):
+       "workspace":os.path.isdir(WORKSPACE),
+       "git":os.path.isdir(os.path.join(WORKSPACE,".git")),
+       "claude_code":bool(a.get("claude-code")),
++      "anthropic":bool(a.get("anthropic")),
+       "openai":bool(a.get("openai")),
+       "gemini":bool(a.get("gemini")),
++      "groq":bool(a.get("groq")),
+       "openrouter":bool(a.get("openrouter")),
+       "ollama":bool(a.get("ollama")),
+       "github":github.enabled(),
+@@ -93,10 +95,25 @@ def startup(_:None=Depends(auth)):
+ def health():
+     return {"status":"ok","service":"ans-agent","workspace":os.path.isdir(WORKSPACE),"github":github.enabled(),"jobs":"sqlite"}
+ 
++@app.get("/auth/check")
++def auth_check(_:None=Depends(auth)):
++    # Lets the login page validate a token before storing it.
++    return {"ok":True}
++
++@app.on_event("startup")
++def _discover_free_models():
++    # If OpenRouter is configured, enrich the pool with its free models in the
++    # background so the router has good/fast/free options out of the box.
++    if not os.getenv("OPENROUTER_API_KEY"): return
++    def _bg():
++        try: router.discover_openrouter(limit=60)
++        except Exception: pass
++    import threading; threading.Thread(target=_bg,daemon=True).start()
++
+ @app.get("/diagnostics")
+ def diagnostics(_:None=Depends(auth)):
+     adapters=Orchestrator(router,WORKSPACE).adapters
+-    checks={"workspace":os.path.isdir(WORKSPACE),"claude_code":bool(adapters.get("claude-code")),"openai":bool(adapters.get("openai")),"gemini":bool(adapters.get("gemini")),"openrouter":bool(adapters.get("openrouter")),"ollama":bool(adapters.get("ollama")),"github":github.enabled(),"job_persistence":os.path.exists(jobs.db_path)}
++    checks={"workspace":os.path.isdir(WORKSPACE),"claude_code":bool(adapters.get("claude-code")),"anthropic":bool(adapters.get("anthropic")),"openai":bool(adapters.get("openai")),"gemini":bool(adapters.get("gemini")),"groq":bool(adapters.get("groq")),"openrouter":bool(adapters.get("openrouter")),"ollama":bool(adapters.get("ollama")),"github":github.enabled(),"job_persistence":os.path.exists(jobs.db_path)}
+     routing_ready=bool(router.rank("planner")) and bool(router.rank("executor",requires_tools=True))
+     return {"ok":checks["workspace"] and checks["job_persistence"] and routing_ready,"checks":checks,"routing":{"planner":bool(router.rank("planner")),"executor":bool(router.rank("executor",requires_tools=True))}}
+ 
+@@ -185,7 +202,7 @@ def route(req:RouteRequest,_:None=Depends(auth)):
+     return router.choose(req.role,requires_tools=req.requires_tools,prefer_free=req.prefer_free).__dict__
+ 
+ def _chat_prompt(history,message):
+-    lines=[]
++    lines=["Ты — полезный универсальный ИИ-ассистент ANS. Отвечай по-русски, ясно и по делу.",""]
+     for h in (history or [])[-20:]:
+         role=h.get("role","user"); content=(h.get("content") or "").strip()
+         if not content: continue
+diff --git a/core/adapters.py b/core/adapters.py
+index 7d8b426..ea5b9f6 100644
+--- a/core/adapters.py
++++ b/core/adapters.py
+@@ -35,6 +35,60 @@ class ClaudeCodeAdapter:
+         # /chat streaming contract holds for every provider.
+         yield self.complete(prompt,**kwargs).text
+ 
++class AnthropicAdapter:
++    """Native Anthropic Messages API adapter (https://api.anthropic.com/v1/messages).
++
++    Anthropic's API is *not* OpenAI-compatible (different endpoint, auth header and
++    response shape), so it gets its own adapter. Used only when ANTHROPIC_API_KEY is
++    set; local Claude Code (CLI) remains a separate provider for dev machines.
++    """
++    def __init__(self,model=None,api_key_env="ANTHROPIC_API_KEY"):
++        self.name="anthropic"
++        self.api_key_env=api_key_env
++        self.model=model or os.getenv("ANTHROPIC_MODEL","claude-sonnet-4-5")
++        self.base_url=os.getenv("ANTHROPIC_BASE_URL","https://api.anthropic.com/v1").rstrip("/")
++        self.version=os.getenv("ANTHROPIC_VERSION","2023-06-01")
++    def _resolve(self,requested):
++        aliases={"anthropic","claude","claude-code","default"}
++        return self.model if (not requested or requested in aliases) else requested
++    def _headers(self,key):
++        return {"x-api-key":key,"anthropic-version":self.version,"content-type":"application/json","User-Agent":"ANS-Agent/1.0"}
++    def complete(self,prompt,**kwargs):
++        key=os.getenv(self.api_key_env)
++        if not key: raise ProviderError(f"Missing {self.api_key_env}")
++        model=self._resolve(kwargs.get("model"))
++        payload=json.dumps({"model":model,"max_tokens":kwargs.get("max_tokens",4096),
++                            "messages":[{"role":"user","content":prompt}]}).encode()
++        req=urllib.request.Request(self.base_url+"/messages",data=payload,headers=self._headers(key))
++        try:
++            with urllib.request.urlopen(req,timeout=kwargs.get("timeout",120)) as r: data=json.load(r)
++        except Exception as e: raise ProviderError(f"anthropic: {e}") from e
++        try:
++            text="".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
++            return ProviderResponse(text,data)
++        except (KeyError,TypeError) as e: raise ProviderError("anthropic: malformed response") from e
++    def stream(self,prompt,**kwargs):
++        key=os.getenv(self.api_key_env)
++        if not key: raise ProviderError(f"Missing {self.api_key_env}")
++        model=self._resolve(kwargs.get("model"))
++        payload=json.dumps({"model":model,"max_tokens":kwargs.get("max_tokens",4096),
++                            "messages":[{"role":"user","content":prompt}],"stream":True}).encode()
++        req=urllib.request.Request(self.base_url+"/messages",data=payload,headers=self._headers(key))
++        try:
++            r=urllib.request.urlopen(req,timeout=kwargs.get("timeout",120))
++        except Exception as e: raise ProviderError(f"anthropic: {e}") from e
++        with r:
++            for raw in r:
++                line=(raw.decode("utf-8","ignore") if isinstance(raw,bytes) else str(raw)).strip()
++                if not line or not line.startswith("data:"): continue
++                data=line[5:].strip()
++                if not data or data=="[DONE]": continue
++                try: obj=json.loads(data)
++                except Exception: continue
++                if obj.get("type")=="content_block_delta":
++                    delta=(obj.get("delta") or {}).get("text")
++                    if delta: yield delta
++
+ class OpenAICompatibleAdapter:
+     def __init__(self,name,base_url,api_key_env,model=None):
+         self.name=name; self.base_url=base_url.rstrip("/"); self.api_key_env=api_key_env; self.model=model
+@@ -131,7 +185,12 @@ class OllamaAdapter:
+ 
+ def build_adapters():
+     out={"claude-code":ClaudeCodeAdapter(), "ollama":OllamaAdapter()}
++    # Native Anthropic API (Claude) — used when a key is present; falls back to the
++    # local Claude Code CLI on dev machines that have it.
++    if os.getenv("ANTHROPIC_API_KEY"): out["anthropic"]=AnthropicAdapter(os.getenv("ANTHROPIC_MODEL","claude-sonnet-4-5"))
+     if os.getenv("OPENAI_API_KEY"): out["openai"]=OpenAICompatibleAdapter("openai","https://api.openai.com/v1","OPENAI_API_KEY",os.getenv("OPENAI_MODEL","gpt-5"))
+     if os.getenv("GEMINI_API_KEY"): out["gemini"]=OpenAICompatibleAdapter("google","https://generativelanguage.googleapis.com/v1beta/openai","GEMINI_API_KEY",os.getenv("GEMINI_MODEL","gemini-2.5-flash"))
+     if os.getenv("OPENROUTER_API_KEY"): out["openrouter"]=OpenAICompatibleAdapter("openrouter","https://openrouter.ai/api/v1","OPENROUTER_API_KEY",os.getenv("OPENROUTER_MODEL","openrouter/free"))
++    # Groq — free tier, extremely fast inference (OpenAI-compatible endpoint).
++    if os.getenv("GROQ_API_KEY"): out["groq"]=OpenAICompatibleAdapter("groq","https://api.groq.com/openai/v1","GROQ_API_KEY",os.getenv("GROQ_MODEL","llama-3.3-70b-versatile"))
+     return out
+diff --git a/core/orchestrator.py b/core/orchestrator.py
+index 030eede..d0e6df7 100644
+--- a/core/orchestrator.py
++++ b/core/orchestrator.py
+@@ -78,7 +78,7 @@ class Orchestrator:
+             task="PROJECT MEMORY:\n"+context+"\n\nTASK:\n"+task
+         profile=getattr(self,"profile",None)
+         if profile: self.emit("profile.selected",profile.name,planner=profile.planner,executor=profile.executor,reviewer=profile.reviewer)
+-        plan_text=self.call("planner","Create an ordered implementation plan. Return one step per line.\n\nTASK:\n"+task)
++        plan_text=self.call("planner","Составь пошаговый план выполнения задачи. Одна строка — один конкретный шаг, без нумерации и лишних слов. Отвечай по-русски.\n\nЗАДАЧА:\n"+task)
+         state.plan=[x.strip("- •0123456789.\t") for x in plan_text.splitlines() if x.strip()]
+         graph=TaskGraph(state.plan)
+         self.emit("task.graph",graph.snapshot())
+@@ -123,7 +123,7 @@ class Orchestrator:
+                         self.emit("provider.selected",m.provider+"/"+m.model,role="executor",step=step,attempt=attempt_number,policy=policy,budget=budget,score=self.router.score(m,"executor"),estimated_cost=self.router.cost_estimate(m,4000,2000))
+                         loop=ToolLoop(adapter,executor,emit=self.emit,
+                                       approval=self.approval,session_id=self.session_id)
+-                        output=loop.run(f"TASK: {task}\nSTEP: {step}\nInspect the workspace and implement this step. Verify your changes.",max_steps=20)
++                        output=loop.run(f"ЗАДАЧА: {task}\nШАГ: {step}\nИзучи рабочую область и выполни этот шаг с помощью инструментов. Проверь результат.",max_steps=20)
+                         elapsed=__import__("time").time()-started
+                         self.router.report_success(m)
+                         self.router.record_task(m,"executor",True,elapsed)
+@@ -149,13 +149,13 @@ class Orchestrator:
+             if output.startswith("APPROVAL_REQUIRED:"):
+                 state.status="approval_required"
+                 return {"status":state.status,"plan":state.plan,"completed":state.completed,"observations":state.observations,"iterations":state.iteration}
+-            review=self.call("reviewer",f"Task: {task}\nStep: {step}\nExecutor report:\n{output}\n\nReturn PASS or FAIL first, then concrete reasoning.")
++            review=self.call("reviewer",f"Задача: {task}\nШаг: {step}\nОтчёт исполнителя:\n{output}\n\nОцени, выполнен ли шаг. ПЕРВЫМ словом напиши строго PASS (если выполнено) или FAIL (если нет), затем с новой строки — краткое обоснование по-русски.")
+             self.emit("review",review,step=step)
+             state.observations.extend([f"STEP {state.iteration}: {step}",output,review])
+             if review.strip().upper().startswith("PASS"):
+                 state.completed.append(step); state.plan.pop(0); self.emit("step.passed",step)
+             elif mode=="agent":
+-                repair=self.call("fixer",f"Task: {task}\nStep: {step}\nReview failure:\n{review}\nExecutor report:\n{output}\nFix the issue and return a concise repair plan.",tools=False)
++                repair=self.call("fixer",f"Задача: {task}\nШаг: {step}\nЗамечания проверки:\n{review}\nОтчёт исполнителя:\n{output}\nПредложи, как исправить проблему — кратким планом по-русски.",tools=False)
+                 self.emit("repair.requested",repair,step=step)
+                 state.plan.insert(0,step)
+                 if state.iteration>=state.max_iterations: break
+diff --git a/core/registry.py b/core/registry.py
+index 1091e9b..91c1c08 100644
+--- a/core/registry.py
++++ b/core/registry.py
+@@ -13,12 +13,21 @@ class ModelRegistry:
+     def for_role(self, role: str) -> list[ModelCandidate]:
+         return sorted((m for m in self.models if role in m.roles), key=lambda m: m.priority)
+ 
++    ALL_ROLES = {"executor", "tester", "fixer", "planner", "architect", "reviewer", "researcher", "judge"}
++
+     @classmethod
+     def default(cls) -> "ModelRegistry":
++        import os
+         r = cls()
+-        r.register(ModelCandidate("anthropic", "claude-code", {"executor", "tester", "fixer", "planner", "architect", "reviewer", "researcher", "judge"}, tool_capable=True, priority=1))
+-        r.register(ModelCandidate("openai", "gpt", {"planner", "architect", "reviewer", "judge"}, priority=5))
+-        r.register(ModelCandidate("google", "gemini", {"researcher", "planner", "reviewer"}, priority=10))
+-        r.register(ModelCandidate("openrouter", "openrouter/free", {"researcher", "reviewer", "planner"}, free=True, priority=50))
+-        r.register(ModelCandidate("ollama", "local", {"researcher", "planner", "architect", "reviewer", "judge", "executor", "tester", "fixer"}, free=True, tool_capable=True, priority=80))
++        # Local Claude Code CLI (dev machines only; the model name 'claude-code'
++        # routes to the CLI adapter). Highest static priority when present.
++        r.register(ModelCandidate("anthropic", "claude-code", set(cls.ALL_ROLES), tool_capable=True, priority=1))
++        # Native Anthropic API (Claude) — used when ANTHROPIC_API_KEY is set.
++        r.register(ModelCandidate("anthropic", os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"), set(cls.ALL_ROLES), tool_capable=True, priority=2))
++        # Groq — free + very fast; good default executor when no premium key.
++        r.register(ModelCandidate("groq", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"), set(cls.ALL_ROLES), tool_capable=True, priority=8))
++        r.register(ModelCandidate("openai", "gpt", {"planner", "architect", "reviewer", "judge", "executor", "tester", "fixer"}, tool_capable=True, priority=5))
++        r.register(ModelCandidate("google", "gemini", {"researcher", "planner", "reviewer", "judge", "executor"}, tool_capable=True, priority=10))
++        r.register(ModelCandidate("openrouter", "openrouter/free", {"researcher", "reviewer", "planner", "executor"}, free=True, tool_capable=True, priority=50))
++        r.register(ModelCandidate("ollama", "local", set(cls.ALL_ROLES), free=True, tool_capable=True, priority=80))
+         return r
+diff --git a/core/router.py b/core/router.py
+index 3969013..902dafd 100644
+--- a/core/router.py
++++ b/core/router.py
+@@ -55,7 +55,7 @@ class ModelRouter:
+     if m.provider=="openrouter" and m.model=="openrouter/free": m.free=True
+   return self.pool()
+  def _available(self,m):
+-  keys={"anthropic":"ANTHROPIC_API_KEY","openai":"OPENAI_API_KEY","google":"GEMINI_API_KEY","openrouter":"OPENROUTER_API_KEY"}
++  keys={"anthropic":"ANTHROPIC_API_KEY","openai":"OPENAI_API_KEY","google":"GEMINI_API_KEY","openrouter":"OPENROUTER_API_KEY","groq":"GROQ_API_KEY"}
+   if m.provider=="ollama":
+    try:
+     import urllib.request, json
+@@ -72,7 +72,10 @@ class ModelRouter:
+    except Exception:
+     return False
+   if m.provider=="anthropic":
+-   return bool(os.getenv("ANTHROPIC_API_KEY")) or self._claude_cli_available()
++   # The local CLI model is only usable where the 'claude' binary exists; every
++   # other Anthropic model routes through the API and needs a key.
++   if m.model=="claude-code": return self._claude_cli_available()
++   return bool(os.getenv("ANTHROPIC_API_KEY"))
+   env=keys.get(m.provider)
+   if env:
+    return bool(os.getenv(env))
+diff --git a/core/tool_loop.py b/core/tool_loop.py
+index 6c577fe..8f42f09 100644
+--- a/core/tool_loop.py
++++ b/core/tool_loop.py
+@@ -1,23 +1,27 @@
+ import json, re
+ 
+ TOOLS = (
+-    "You are an autonomous agent working inside a sandboxed project workspace.\n"
+-    "Available tools (call ONE per step by outputting a single JSON line):\n"
++    "Ты — автономный универсальный ИИ-агент. Ты решаешь ЛЮБЫЕ задачи "
++    "(код, исследование, тексты, анализ данных, работа с файлами), "
++    "используя инструменты внутри изолированной рабочей области.\n"
++    "Отвечай пользователю по-русски.\n\n"
++    "Доступные инструменты (вызывай РОВНО ОДИН за шаг, выводя одну строку JSON):\n"
+     "- read_file {path}\n"
+-    "- write_file {path, content}   # create or overwrite a whole file\n"
+-    "- replace_in_file {path, old, new}   # surgical edit; 'old' must appear exactly once\n"
++    "- write_file {path, content}   # создать или перезаписать файл целиком\n"
++    "- replace_in_file {path, old, new}   # точечная правка; 'old' должен встречаться ровно один раз\n"
+     "- append_file {path, content}\n"
+     "- list_files {path?}\n"
+     "- search {query, path?}\n"
+-    "- web_search {query, limit?}   # search the web\n"
+-    "- web_fetch {url}   # download a web page as text\n"
++    "- web_search {query, limit?}   # поиск в интернете\n"
++    "- web_fetch {url}   # скачать веб-страницу как текст\n"
+     "- terminal {command, timeout?}\n"
+     "- git_status {}\n- git_diff {}\n- git_log {}\n"
+-    "- finish {summary}   # call when the step is complete; summary is the result\n"
+-    "Rules: think briefly, then output exactly one JSON line like "
++    "- finish {summary}   # вызови, когда шаг выполнен; summary — итог по-русски\n\n"
++    "Правила: коротко подумай, затем выведи ровно одну строку JSON вида "
+     '{\"tool\":\"read_file\",\"args\":{\"path\":\"app.py\"}}. '
+-    "Use the tool results in PROGRESS to decide the next action. "
+-    "When the task is done, call finish with a concise summary of what you did."
++    "Опирайся на результаты в PROGRESS, чтобы выбрать следующее действие. "
++    "Если для задачи нужны свежие факты — используй web_search/web_fetch. "
++    "Когда задача выполнена, вызови finish с кратким понятным итогом на русском."
+ )
+ 
+ 
+diff --git a/deploy/NGINX.md b/deploy/NGINX.md
+new file mode 100644
+index 0000000..2c22c4f
+--- /dev/null
++++ b/deploy/NGINX.md
+@@ -0,0 +1,49 @@
++# Доступ к агенту по ссылке (agent.ansservice.ru) через твой nginx + Cloudflare
++
++Схема на VPS: весь `:443` перехватывает **stream-блок** nginx по SNI (`ssl_preread`)
++и раздаёт по внутренним портам; спереди **Cloudflare в режиме Full** (самоподписанный
++сертификат на VPS допустим). Поэтому обычный `listen 443 ssl` не подойдёт — нужны два шага.
++
++Внутренний порт для агента: **10447** (свободен; заняты 10443–10446, 7080).
++Контейнер агента слушает `127.0.0.1:8899` — публично он не открыт, только через nginx.
++
++## 1. DNS в Cloudflare
++Добавь запись: `agent` → A/CNAME на IP VPS (`45.88.173.84`), **оранжевое облако (Proxied)**.
++SSL/TLS режим — **Full** (не Strict, т.к. на VPS самоподписанный сертификат).
++
++## 2. Самоподписанный сертификат на VPS
++```
++sudo mkdir -p /etc/nginx/ssl
++sudo openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
++  -keyout /etc/nginx/ssl/agent.ansservice.ru.key \
++  -out    /etc/nginx/ssl/agent.ansservice.ru.crt \
++  -subj "/CN=agent.ansservice.ru"
++```
++
++## 3. Запись в SNI stream-карте
++В `/etc/nginx/nginx.conf`, в блоке `stream { map $ssl_preread_server_name $backend { … } }`,
++добавь строку рядом с остальными:
++```
++        agent.ansservice.ru 127.0.0.1:10447;
++```
++
++## 4. HTTP-блок агента
++```
++sudo cp deploy/nginx-agent.conf /etc/nginx/conf.d/ans-agent.conf
++sudo nginx -t && sudo systemctl reload nginx
++```
++Если `nginx -t` ругается на дубль `map … $ans_conn_upgrade` — значит имя всё же занято;
++переименуй переменную в `nginx-agent.conf` и повтори. (Штатно имя уникальное.)
++
++## 5. Проверка
++- Локально на VPS: `curl -k https://127.0.0.1:10447/health` → `{"status":"ok",...}`
++- С любого устройства: открой **https://agent.ansservice.ru** → страница входа →
++  вставь токен из `cat /opt/ans-agent/data/auth.token` → готово.
++
++## Безопасность (агент выполняет код — считать привилегированным)
++- Вход по токену уже включён. Токен = пароль, храни его как пароль.
++- Рекомендую добавить **Cloudflare Access** на `agent.ansservice.ru` (вход по email-коду) —
++  второй рубеж перед приложением.
++- Смена токена: `rm /opt/ans-agent/data/auth.token` и перезапуск контейнера
++  (`docker compose -f deploy/docker-compose.prod.yml restart ans-agent`).
++- `ANS_BIND` оставь `127.0.0.1` — наружу агент смотрит только через nginx.
+diff --git a/deploy/docker-compose.prod.yml b/deploy/docker-compose.prod.yml
+index 3ccdfa5..3010a7f 100644
+--- a/deploy/docker-compose.prod.yml
++++ b/deploy/docker-compose.prod.yml
+@@ -31,8 +31,9 @@ services:
+     security_opt:
+       - no-new-privileges:true
+     ports:
+-      # Bind ONLY to the VPN interface (set ANS_BIND in .env). Never 0.0.0.0.
+-      - "${ANS_BIND:-127.0.0.1}:8080:8080"
++      # Bind ONLY to the VPN interface / localhost (set ANS_BIND in .env). Never 0.0.0.0.
++      # Host port is ANS_HOST_PORT (default 8899 to avoid clashing with common 8080 panels).
++      - "${ANS_BIND:-127.0.0.1}:${ANS_HOST_PORT:-8899}:8080"
+     healthcheck:
+       test: ["CMD","curl","-fsS","http://127.0.0.1:8080/health"]
+       interval: 30s
+diff --git a/deploy/nginx-agent.conf b/deploy/nginx-agent.conf
+new file mode 100644
+index 0000000..4f9b975
+--- /dev/null
++++ b/deploy/nginx-agent.conf
+@@ -0,0 +1,48 @@
++# ANS Agent — HTTP-блок ЗА твоим SNI-stream роутером nginx.
++# Путь трафика:
++#   Cloudflare (proxied, SSL=Full) → VPS :443 (stream, ssl_preread по SNI)
++#   → 127.0.0.1:10447 (этот server) → 127.0.0.1:8899 (контейнер агента)
++#
++# Устанавливается вместе с ДВУМЯ шагами из deploy/NGINX.md:
++#   (1) запись в stream-карте:  agent.ansservice.ru 127.0.0.1:10447;
++#   (2) этот файл в /etc/nginx/conf.d/  + самоподписанный сертификат.
++#
++# Уникальное имя переменной, чтобы НЕ конфликтовать с уже существующей
++# map $http_upgrade $connection_upgrade в твоём nginx.conf.
++map $http_upgrade $ans_conn_upgrade { default upgrade; '' close; }
++
++server {
++    listen 127.0.0.1:10447 ssl;
++    http2 on;
++    server_name agent.ansservice.ru;
++
++    # Self-signed достаточно: TLS до пользователя терминирует Cloudflare (Full).
++    ssl_certificate     /etc/nginx/ssl/agent.ansservice.ru.crt;
++    ssl_certificate_key /etc/nginx/ssl/agent.ansservice.ru.key;
++    ssl_protocols TLSv1.2 TLSv1.3;
++
++    client_max_body_size 25m;
++
++    # Агент выполняет код на сервере. Доступ закрыт входом по токену в самом
++    # приложении. По желанию добавь ещё Cloudflare Access (вход по email-коду).
++
++    location / {
++        proxy_pass http://127.0.0.1:8899;
++        proxy_http_version 1.1;
++        proxy_set_header Host              $host;
++        proxy_set_header X-Real-IP         $remote_addr;
++        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
++        proxy_set_header X-Forwarded-Proto https;
++
++        # WebSocket — живая лента шагов агента (/ws/…)
++        proxy_set_header Upgrade    $http_upgrade;
++        proxy_set_header Connection $ans_conn_upgrade;
++
++        # SSE — потоковые ответы чата (/chat): отключаем буферизацию,
++        # держим соединение открытым долго.
++        proxy_buffering    off;
++        proxy_cache        off;
++        proxy_read_timeout 3600s;
++        proxy_send_timeout 3600s;
++    }
++}
+diff --git a/scripts/deploy.sh b/scripts/deploy.sh
+index 7202b14..cdd836d 100755
+--- a/scripts/deploy.sh
++++ b/scripts/deploy.sh
+@@ -1,13 +1,28 @@
+ #!/usr/bin/env bash
+ # One-shot production deploy for ANS Agent (app + local Ollama), VPN-only access.
+-# Run from the repo root:  bash scripts/deploy.sh
++# Idempotent: safe to re-run for updates.  Run from repo root:  bash scripts/deploy.sh
+ set -euo pipefail
+ cd "$(dirname "$0")/.."
+ 
+-command -v docker >/dev/null || { echo "Docker is required. Install docker + compose plugin first."; exit 1; }
+-docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 plugin is required."; exit 1; }
++# --- Docker ---
++if ! command -v docker >/dev/null; then
++  echo ">> Installing Docker..."
++  curl -fsSL https://get.docker.com | sh
++fi
++docker compose version >/dev/null 2>&1 || { echo "!! Docker Compose v2 plugin missing. Install docker-compose-plugin."; exit 1; }
+ 
+-[ -f .env ] || { cp .env.example .env; echo ">> Created .env from template — edit it (ANS_BIND, OLLAMA_MODEL, API keys) and re-run."; exit 1; }
++# --- .env (create with sane defaults on first run, then continue) ---
++if [ ! -f .env ]; then
++  cp .env.example .env
++  # Auto-detect a VPN/private interface IP to bind to (wg*/tun* preferred).
++  VPNIP="$(ip -4 -o addr show 2>/dev/null | awk '/wg|tun/{print $4}' | cut -d/ -f1 | head -1)"
++  [ -z "${VPNIP:-}" ] && VPNIP="$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -E '^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)' | grep -v '^127' | head -1)"
++  [ -z "${VPNIP:-}" ] && VPNIP="127.0.0.1"
++  sed -i "s|^ANS_BIND=.*|ANS_BIND=${VPNIP}|" .env
++  sed -i "s|^OLLAMA_MODEL=.*|OLLAMA_MODEL=llama3.2|" .env
++  chmod 600 .env
++  echo ">> Created .env  (ANS_BIND=${VPNIP}; add API keys later if you want premium routing)"
++fi
+ set -a; . ./.env; set +a
+ mkdir -p data workspace
+ 
+@@ -16,12 +31,15 @@ echo ">> Building and starting app + ollama..."
+ $COMPOSE up -d --build
+ 
+ MODEL="${OLLAMA_MODEL:-llama3.2}"
+-echo ">> Pulling Ollama model: $MODEL (this can take a while on first run)..."
+-$COMPOSE exec -T ollama ollama pull "$MODEL" || echo "!! model pull failed — pull manually later: $COMPOSE exec ollama ollama pull $MODEL"
++echo ">> Pulling Ollama model: $MODEL ..."
++$COMPOSE exec -T ollama ollama pull "$MODEL" || echo "!! model pull failed; retry: $COMPOSE exec ollama ollama pull $MODEL"
+ 
+-BIND="${ANS_BIND:-127.0.0.1}"
+-sleep 3
+-echo ">> Health check:"
+-curl -fsS "http://${BIND}:8080/health" && echo || echo "!! health check failed; see: $COMPOSE logs --tail=50 ans-agent"
+-echo ">> Auth token (paste into the UI): $(cat data/auth.token 2>/dev/null || echo '(created on first request)')"
+-echo ">> UI: http://${BIND}:8080/  (reachable only via the VPN if ANS_BIND is the VPN interface IP)"
++BIND="${ANS_BIND:-127.0.0.1}"; HP="${ANS_HOST_PORT:-8899}"
++sleep 4
++echo "==================== RESULT ===================="
++echo "bind:  ${BIND}:${HP}"
++echo -n "health: "; curl -fsS "http://${BIND}:${HP}/health" || echo "(FAILED — $COMPOSE logs --tail=60 ans-agent)"
++echo
++echo "token: $(cat data/auth.token 2>/dev/null || echo '(created on first request)')"
++echo "UI:    http://${BIND}:${HP}/   (reach via SSH tunnel or your admin VPN)"
++echo "================================================"
+diff --git a/tests/test_agent_extra.py b/tests/test_agent_extra.py
+index 589e81a..050bb34 100644
+--- a/tests/test_agent_extra.py
++++ b/tests/test_agent_extra.py
+@@ -44,9 +44,9 @@ def test_orchestrator_cancels_before_step(tmp_path):
+ def test_orchestrator_returns_summary(tmp_path, monkeypatch):
+     class A:
+         def complete(self, p, **k):
+-            if "implementation plan" in p:
++            if "пошаговый план" in p:
+                 t = "1. only step"
+-            elif "PASS or FAIL" in p:
++            elif "PASS" in p and "FAIL" in p:
+                 t = "PASS looks good"
+             else:
+                 t = "Итог: задача выполнена, файл обновлён."
+diff --git a/tests/test_executor_fallback.py b/tests/test_executor_fallback.py
+index a9ad4e3..10734f1 100644
+--- a/tests/test_executor_fallback.py
++++ b/tests/test_executor_fallback.py
+@@ -12,9 +12,9 @@ def test_executor_provider_fallback(monkeypatch, tmp_path):
+             if self.error:
+                 raise RuntimeError(self.error)
+             text = self.text
+-            if "Create an ordered implementation plan" in prompt:
++            if "пошаговый план" in prompt:
+                 text = "1. create file"
+-            elif "Return PASS or FAIL first" in prompt:
++            elif "PASS" in prompt and "FAIL" in prompt:
+                 text = "PASS"
+             return type("R", (), {"text": text})()
+     class FakeLoop:
+diff --git a/tests/test_new_features.py b/tests/test_new_features.py
+new file mode 100644
+index 0000000..9d1c2b0
+--- /dev/null
++++ b/tests/test_new_features.py
+@@ -0,0 +1,111 @@
++"""Tests for the added online providers, auth-check endpoint and history access."""
++import io, json
++import app as appmod
++from fastapi.testclient import TestClient
++from core import adapters as A
++from core.registry import ModelRegistry
++from core.router import ModelRouter
++
++client = TestClient(appmod.app)
++
++
++# ---------- Anthropic native adapter ----------
++def test_anthropic_complete_parses_messages(monkeypatch):
++    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
++    body = json.dumps({"content": [{"type": "text", "text": "привет"}]}).encode()
++
++    class R:
++        def read(self): return body
++        def __enter__(self): return self
++        def __exit__(self, *a): return False
++    monkeypatch.setattr(A.urllib.request, "urlopen", lambda req, timeout=0: R())
++    ad = A.AnthropicAdapter("claude-sonnet-4-5")
++    assert ad.complete("hi").text == "привет"
++
++
++def test_anthropic_stream_yields_text(monkeypatch):
++    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
++    lines = [
++        b'data: {"type":"content_block_delta","delta":{"text":"aa"}}',
++        b'data: {"type":"content_block_delta","delta":{"text":"bb"}}',
++        b'data: [DONE]',
++    ]
++    monkeypatch.setattr(A.urllib.request, "urlopen", lambda req, timeout=0: io.BytesIO(b"\n".join(lines)))
++    ad = A.AnthropicAdapter("claude-sonnet-4-5")
++    assert "".join(ad.stream("hi")) == "aabb"
++
++
++def test_anthropic_missing_key_raises(monkeypatch):
++    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
++    try:
++        A.AnthropicAdapter().complete("hi")
++        assert False, "expected ProviderError"
++    except A.ProviderError:
++        pass
++
++
++# ---------- build_adapters wiring ----------
++def test_build_adapters_includes_new_providers(monkeypatch):
++    for k in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY"):
++        monkeypatch.setenv(k, "x")
++    out = A.build_adapters()
++    assert {"anthropic", "groq", "openai", "claude-code", "ollama"} <= set(out)
++
++
++# ---------- registry / router availability ----------
++def test_registry_has_api_claude_and_groq():
++    models = {(m.provider, m.model) for m in ModelRegistry.default().models}
++    assert ("groq", "llama-3.3-70b-versatile") in models
++    assert ("anthropic", "claude-code") in models
++    assert any(p == "anthropic" and m != "claude-code" for p, m in models)
++
++
++def test_router_gates_by_key(monkeypatch):
++    monkeypatch.delenv("GROQ_API_KEY", raising=False)
++    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
++    reg = ModelRegistry.default(); rt = ModelRouter(reg)
++    groq = next(m for m in reg.models if m.provider == "groq")
++    api_claude = next(m for m in reg.models if m.provider == "anthropic" and m.model != "claude-code")
++    assert rt._available(groq) is False
++    assert rt._available(api_claude) is False
++    monkeypatch.setenv("GROQ_API_KEY", "x")
++    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
++    assert rt._available(groq) is True
++    assert rt._available(api_claude) is True
++
++
++# ---------- auth-check endpoint ----------
++def test_auth_check(monkeypatch):
++    monkeypatch.setattr(appmod, "AUTH_TOKEN", "tok")
++    assert client.get("/auth/check").status_code == 401
++    assert client.get("/auth/check", headers={"Authorization": "Bearer tok"}).status_code == 200
++
++
++# ---------- history: session events are retrievable for replay ----------
++def test_session_events_retrievable(monkeypatch):
++    monkeypatch.setattr(appmod, "AUTH_TOKEN", "tok")
++    h = {"Authorization": "Bearer tok"}
++    s = appmod.sessions.create("тестовая задача", "chat")
++    # app records to both the in-memory session and the DB (as /chat does)
++    s.emit("chat.user", "привет"); appmod.sessions.emit(s.id, "chat.user", "привет")
++    s.emit("chat.assistant", "здравствуйте"); appmod.sessions.emit(s.id, "chat.assistant", "здравствуйте")
++    r = client.get(f"/sessions/{s.id}", headers=h)
++    assert r.status_code == 200
++    kinds = [e["kind"] for e in r.json()["events"]]
++    assert "chat.user" in kinds and "chat.assistant" in kinds
++
++
++def test_session_history_persists_after_restart(monkeypatch, tmp_path):
++    # A fresh store (simulating a restart) must reload dialogue events from the DB
++    # so the user can reopen previous conversations.
++    from core.session import SessionStore
++    db = str(tmp_path / "ans.db")
++    st = SessionStore(db)
++    s = st.create("прошлый диалог", "chat")
++    st.emit(s.id, "chat.user", "вопрос")
++    st.emit(s.id, "chat.assistant", "ответ")
++    st2 = SessionStore(db)  # cold cache -> must read from DB
++    loaded = st2.get(s.id)
++    assert loaded is not None
++    kinds = [e["kind"] for e in loaded.events]
++    assert kinds == ["chat.user", "chat.assistant"]
+diff --git a/web/app.js b/web/app.js
+index 7820d28..a1db6f8 100644
+--- a/web/app.js
++++ b/web/app.js
+@@ -1,4 +1,4 @@
+-/* ANS Agent — frontend: conversational agent + direct chat + workspace + models. */
++/* ANS Агент — интерфейс: агент + прямой чат + файлы + модели + история диалогов. */
+ const $=id=>document.getElementById(id);
+ let token=localStorage.getItem('ans_token')||'';
+ let currentSession=null,currentJob=null,socket=null;
+@@ -6,30 +6,46 @@ let chatHistory=[],chatSession=null,modelPoolCache=[];
+ let agentActivity=null,agentFinal=null;
+ const authHeaders=()=>token?{'Authorization':'Bearer '+token}:{};
+ 
++/* ---------- вход по токену ---------- */
++function showLogin(msg){$('loginError').textContent=msg||'';$('loginModal').classList.remove('hidden');const t=$('loginToken');if(t){t.value='';t.focus();}}
++function hideLogin(){$('loginModal').classList.add('hidden');}
++async function doLogin(){
++  const t=($('loginToken').value||'').trim();
++  if(!t){$('loginError').textContent='Введите токен.';return;}
++  $('loginBtn').disabled=true;$('loginError').textContent='Проверка…';
++  try{
++    const r=await fetch('/auth/check',{headers:{'Authorization':'Bearer '+t}});
++    if(r.ok){token=t;localStorage.setItem('ans_token',token);hideLogin();$('loginError').textContent='';boot();}
++    else{$('loginError').textContent='Неверный токен. Проверьте data/auth.token на сервере.';}
++  }catch(e){$('loginError').textContent='Сервер недоступен: '+e.message;}
++  finally{$('loginBtn').disabled=false;}
++}
++function logout(){token='';localStorage.removeItem('ans_token');if(socket)try{socket.close();}catch(_){}showLogin('Вы вышли. Введите токен для входа.');}
++
+ async function api(url,opts={}){
+   opts.headers={...(opts.headers||{}),...authHeaders()};
+   let r=await fetch(url,opts);
+-  if(r.status===401){token=prompt('Enter ANS auth token')||'';if(token){localStorage.setItem('ans_token',token);opts.headers={...opts.headers,...authHeaders()};r=await fetch(url,opts);}}
++  if(r.status===401){showLogin('Требуется вход.');}
+   return r;
+ }
+ 
+-/* ---------- markdown (safe) ---------- */
++/* ---------- markdown (безопасный) ---------- */
+ function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+ function md(src){
+   src=String(src==null?'':src);
+   const blocks=[];
+-  src=src.replace(/```([\s\S]*?)```/g,(m,c)=>{blocks.push(c);return '  '+(blocks.length-1)+'  ';});
++  src=src.replace(/```([\s\S]*?)```/g,(m,c)=>{blocks.push(c);return '  '+(blocks.length-1)+'  ';});
+   let h=esc(src);
+   h=h.replace(/`([^`\n]+)`/g,'<code>$1</code>');
+   h=h.replace(/^\s*###\s+(.*)$/gm,'<h4>$1</h4>').replace(/^\s*##\s+(.*)$/gm,'<h3>$1</h3>').replace(/^\s*#\s+(.*)$/gm,'<h2>$1</h2>');
+   h=h.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>').replace(/(^|[^*])\*([^*\n]+)\*/g,'$1<i>$2</i>');
+   h=h.replace(/\n/g,'<br>');
+-  h=h.replace(/ (\d+) /g,(m,i)=>'<pre class="code">'+esc(blocks[+i])+'</pre>');
++  h=h.replace(/ (\d+) /g,(m,i)=>'<pre class="code">'+esc(blocks[+i])+'</pre>');
+   return h;
+ }
+ 
+-/* ---------- navigation ---------- */
+-const TITLES={agent:'Agent',chat:'Chat',workspace:'Workspace',models:'Model Pool',sessions:'Sessions'};
++/* ---------- навигация ---------- */
++const TITLES={agent:'Агент',chat:'Чат',workspace:'Файлы',models:'Модели',sessions:'Диалоги'};
+ function setView(name){
+   document.querySelectorAll('.view').forEach(v=>v.hidden=v.dataset.view!==name);
+   document.querySelectorAll('.nav').forEach(n=>n.classList.toggle('active',n.dataset.view===name));
+@@ -38,10 +54,12 @@ function setView(name){
+   if(name==='models'){loadModelPool();renderModelManager();}
+   if(name==='workspace'){loadFiles();loadGit();loadDiff();loadLearning();refreshCircuits();}
+   if(name==='sessions')loadSessions();
++  if(window.innerWidth<=800)$('sidebar').classList.remove('open');
+ }
+ document.querySelectorAll('.nav').forEach(n=>n.addEventListener('click',()=>setView(n.dataset.view)));
++function toggleSidebar(){$('sidebar').classList.toggle('open');}
+ 
+-/* ---------- conversational AGENT ---------- */
++/* ---------- агент ---------- */
+ function threadClear(id,placeholder){$(id).innerHTML='<div class="empty">'+placeholder+'</div>';}
+ function scrollEl(el){el.scrollTop=el.scrollHeight;}
+ function bubble(threadId,role,html){
+@@ -51,21 +69,22 @@ function bubble(threadId,role,html){
+   const body=document.createElement('div');body.className='msg-body';body.innerHTML=html;
+   wrap.append(who,body);t.appendChild(wrap);scrollEl(t);return body;
+ }
+-function newAgent(){currentSession=null;currentJob=null;if(socket)try{socket.close();}catch(_){}threadClear('agentThread','Опиши задачу — агент спланирует и выполнит её инструментами.');$('runstatus').textContent='IDLE';}
++function newAgent(){currentSession=null;currentJob=null;if(socket)try{socket.close();}catch(_){}threadClear('agentThread','Опиши задачу — агент составит план и выполнит её инструментами.');$('runstatus').textContent='ОЖИДАНИЕ';}
+ async function startAgent(){
+   const t=$('agentInput').value.trim();if(!t)return;
+   $('agentInput').value='';$('agentInput').style.height='auto';
++  currentSession=null;
+   bubble('agentThread','user',md(t));
+   const body=bubble('agentThread','assistant','');
+   const act=document.createElement('div');act.className='agent-activity';
+   const fin=document.createElement('div');fin.className='agent-final';
+   body.append(act,fin);agentActivity=act;agentFinal=fin;
+-  $('runstatus').textContent='RUNNING';
++  $('runstatus').textContent='РАБОТАЕТ';
+   try{
+     const r=await api('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task:t,mode:$('agentMode').value,max_iterations:30,profile:$('profile').value,policy:$('policy').value,budget:$('budget').value?Number($('budget').value):null,workspace:(($('agentWorkspace')||{}).value||'').trim()||null})});
+-    const x=await r.json();if(!r.ok)throw Error(x.detail||'run failed');
+-    currentSession=x.session_id;currentJob=x.job_id;connect(x.session_id);pollJob();
+-  }catch(e){actLine('error','⚠ '+e.message);$('runstatus').textContent='FAILED';}
++    const x=await r.json();if(!r.ok)throw Error(x.detail||'запуск не удался');
++    currentSession=x.session_id;currentJob=x.job_id;connect(x.session_id);pollJob();load();
++  }catch(e){actLine('error','⚠ '+e.message);$('runstatus').textContent='ОШИБКА';}
+ }
+ function actLine(kind,text){
+   if(!agentActivity)return;
+@@ -75,16 +94,18 @@ function actLine(kind,text){
+ function agentEvent(x){
+   const k=x.kind||'',m=x.message;
+   if(k==='run.started')actLine('info','▸ Задача принята ('+(x.mode||'agent')+')');
+-  else if(k==='task.graph'){const n=Array.isArray(m)?m.length:(Array.isArray(x.data)?x.data.length:null);actLine('plan','🗺 План'+(n?': '+n+' шаг(ов)':'')+ (typeof m==='string'?'': ''));}
+-  else if(k==='provider.selected')actLine('model','→ '+m+(x.role?' · '+x.role:''));
+-  else if(k==='step.started')actLine('step','● '+m);
+-  else if(k==='tool.call')actLine('tool','🔧 '+m+' '+esc(JSON.stringify(x.args||{}).slice(0,160)));
+-  else if(k==='tool.result')actLine('toolres','&nbsp;&nbsp;↳ '+esc(JSON.stringify(x.result||{}).slice(0,200)));
++  else if(k==='profile.selected')actLine('info','▸ Профиль: '+esc(String(m)));
++  else if(k==='task.graph'){let n=null;try{const p=typeof m==='string'?JSON.parse(m):m;n=Array.isArray(p)?p.length:(p&&p.nodes?Object.keys(p.nodes).length:null);}catch(_){}actLine('plan','🗺 План'+(n?': '+n+' шаг(ов)':' составлен'));}
++  else if(k==='provider.selected')actLine('model','→ '+esc(String(m))+(x.role?' · '+x.role:''));
++  else if(k==='step.started')actLine('step','● '+esc(String(m)));
++  else if(k==='tool.call')actLine('tool','🔧 '+esc(String(m))+' '+esc(JSON.stringify(x.args||{}).slice(0,160)));
++  else if(k==='tool.result')actLine('toolres','&nbsp;&nbsp;↳ '+esc(JSON.stringify(x.result||x.message||{}).slice(0,200)));
+   else if(k==='review')actLine('review','🔎 '+esc(String(m).slice(0,300)));
+-  else if(k==='step.passed')actLine('ok','✓ '+m);
++  else if(k==='step.passed')actLine('ok','✓ '+esc(String(m)));
+   else if(k==='repair.requested')actLine('warn','↻ правка: '+esc(String(m).slice(0,200)));
+   else if(k==='provider.failed')actLine('err','⚠ '+(x.provider||'')+': '+esc(String(m).slice(0,200)));
+   else if(k==='run.completed')actLine('info','✅ Прогон завершён ('+(x.status||'')+')');
++  else if(k==='run.failed')actLine('error','⚠ '+esc(String(m)));
+   else if(k==='approval.waiting'||k==='approval.required'){$('approvalText').textContent=m||'Требуется подтверждение';$('approval').classList.remove('hidden');}
+ }
+ function connect(sid){
+@@ -97,7 +118,7 @@ async function pollJob(){
+   if(!currentJob)return;
+   try{
+     const x=await(await api('/jobs/'+currentJob)).json();
+-    $('runstatus').textContent=(x.status||'unknown').toUpperCase();
++    $('runstatus').textContent=({queued:'В ОЧЕРЕДИ',running:'РАБОТАЕТ',waiting:'ОЖИДАНИЕ',completed:'ГОТОВО',failed:'ОШИБКА',cancelled:'ОСТАНОВЛЕНО'}[x.status]||(x.status||'').toUpperCase());
+     if(['queued','running','waiting'].includes(x.status)){setTimeout(pollJob,1000);return;}
+     renderAgentFinal(x);load();
+   }catch(e){setTimeout(pollJob,1500);}
+@@ -108,17 +129,17 @@ function renderAgentFinal(job){
+   const st=res.status||job.status;const done=(res.completed||[]);const obs=(res.observations||[]);
+   let html='';
+   if(res.summary)html+='<div class="final-summary">'+md(res.summary)+'</div>';
+-  const badge=st==='cancelled'?'⏹ остановлено':st==='completed'?'✅ '+st:'◑ '+st;
++  const badge=st==='cancelled'?'⏹ остановлено':st==='completed'?'✅ завершено':'◑ '+st;
+   html+='<div class="'+(st==='cancelled'?'final-bad':'final-good')+'">'+badge+' · шагов: '+(res.iterations??'—')+'</div>';
+   if(done.length)html+='<div class="final-steps">'+done.map(s=>'✓ '+esc(s)).join('<br>')+'</div>';
+-  if(obs.length)html+='<details class="final-obs"><summary>Детали ('+obs.length+')</summary><pre class="code">'+esc(obs.slice(-12).join('\n\n')).slice(0,6000)+'</pre></details>';
++  if(Array.isArray(obs)&&obs.length)html+='<details class="final-obs"><summary>Детали ('+obs.length+')</summary><pre class="code">'+esc(obs.slice(-12).join('\n\n')).slice(0,6000)+'</pre></details>';
+   agentFinal.innerHTML=html;scrollEl($('agentThread'));
+ }
+ async function cancelJob(){if(currentJob)await api('/jobs/'+currentJob+'/cancel',{method:'POST'});}
+ async function decide(allow){if(!currentSession)return;await api('/approvals/'+currentSession,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({allow})});$('approval').classList.add('hidden');}
+ 
+-/* ---------- direct CHAT ---------- */
+-function newChat(){chatHistory=[];chatSession=null;threadClear('chatThread','Прямой чат с выбранной моделью (без инструментов).');}
++/* ---------- прямой чат ---------- */
++function newChat(){chatHistory=[];chatSession=null;threadClear('chatThread','Прямой диалог с выбранной моделью — без инструментов.');}
+ async function sendChat(){
+   const inp=$('chatInput');const msg=inp.value.trim();if(!msg)return;
+   inp.value='';inp.style.height='auto';
+@@ -133,7 +154,7 @@ async function sendChat(){
+     const reader=r.body.getReader(),dec=new TextDecoder();let buf='';
+     while(true){const {value,done}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});let idx;
+       while((idx=buf.indexOf('\n\n'))>=0){const chunk=buf.slice(0,idx);buf=buf.slice(idx+2);const line=chunk.split('\n').find(l=>l.startsWith('data:'));if(!line)continue;let ev;try{ev=JSON.parse(line.slice(5).trim());}catch(_){continue;}
+-        if(ev.type==='start')chatSession=ev.session_id;
++        if(ev.type==='start'){chatSession=ev.session_id;if(ev.provider)b.dataset.model=ev.provider+'/'+ev.model;}
+         else if(ev.type==='delta'){acc+=ev.content;b.innerHTML=md(acc);scrollEl($('chatThread'));}
+         else if(ev.type==='error'){acc+='\n\n⚠️ '+ev.error;b.innerHTML=md(acc);}
+       }
+@@ -143,46 +164,90 @@ async function sendChat(){
+   chatHistory.push({role:'assistant',content:acc});load();
+ }
+ 
+-/* ---------- textareas ---------- */
+-function autoGrow(el){el.addEventListener('input',()=>{el.style.height='auto';el.style.height=Math.min(el.scrollHeight,180)+'px';});el.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();el.id==='agentInput'?startAgent():sendChat();}});}
++/* ---------- textarea ---------- */
++function autoGrow(el){if(!el)return;el.addEventListener('input',()=>{el.style.height='auto';el.style.height=Math.min(el.scrollHeight,180)+'px';});el.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();el.id==='agentInput'?startAgent():sendChat();}});}
+ 
+-/* ---------- model pool ---------- */
+-function modelOptions(){return modelPoolCache.map(m=>({label:m.provider+'/'+m.model+(m.free?' · free':'')+(m.available?'':' · offline'),value:m.provider+'|'+m.model}));}
+-function fillModelSelectors(){const sel=$('chatModel');if(sel){const cur=sel.value;sel.innerHTML='<option value="">Auto (router)</option>'+modelOptions().map(o=>'<option value="'+o.value+'">'+o.label+'</option>').join('');sel.value=cur;}}
++/* ---------- пул моделей ---------- */
++function modelOptions(){return modelPoolCache.map(m=>({label:m.provider+'/'+m.model+(m.free?' · беспл.':'')+(m.available?'':' · офлайн'),value:m.provider+'|'+m.model}));}
++function fillModelSelectors(){const sel=$('chatModel');if(sel){const cur=sel.value;sel.innerHTML='<option value="">Авто (роутер)</option>'+modelOptions().map(o=>'<option value="'+o.value+'">'+o.label+'</option>').join('');sel.value=cur;}}
+ async function loadModelPool(){
+   try{modelPoolCache=await(await api('/model-pool')).json();}catch(e){modelPoolCache=[];}
+   fillModelSelectors();
+-  const box=$('models');if(box)box.innerHTML=modelPoolCache.map(m=>'<div class="model"><span>'+m.provider+'/'+m.model+' <small>'+m.roles.join(', ')+'</small></span><span><button class="mini" onclick="testModel(\''+encodeURIComponent(m.provider)+'\',\''+encodeURIComponent(m.model)+'\')">Test</button> <b class="'+(m.free?'free':'')+'">'+(m.available?'READY':'CONFIG')+'</b></span></div>').join('');
++  const box=$('models');if(box)box.innerHTML=modelPoolCache.map(m=>'<div class="model"><span>'+m.provider+'/'+m.model+' <small>'+m.roles.join(', ')+'</small></span><span><button class="mini" onclick="testModel(\''+encodeURIComponent(m.provider)+'\',\''+encodeURIComponent(m.model)+'\')">Тест</button> <b class="'+(m.free?'free':'')+'">'+(m.available?'ГОТОВА':'НАСТРОЙКА')+'</b></span></div>').join('');
+ }
+ async function refreshModels(){await api('/model-pool/refresh',{method:'POST'});loadModelPool();}
+-async function testModel(p,m){const x=await(await api('/model-pool/test/'+p+'/'+m,{method:'POST'})).json();alert(x.provider+'/'+x.model+': '+(x.available?'READY':'UNAVAILABLE')+(x.response?'\n'+x.response:'')+(x.error?'\n'+x.error:''));}
++async function testModel(p,m){const x=await(await api('/model-pool/test/'+p+'/'+m,{method:'POST'})).json();alert(x.provider+'/'+x.model+': '+(x.available?'ГОТОВА':'НЕДОСТУПНА')+(x.response?'\n'+x.response:'')+(x.error?'\n'+x.error:''));}
+ async function renderModelManager(){
+   const ms=modelPoolCache.length?modelPoolCache:await(await api('/model-pool')).json();const el=$('modelManager');if(!el)return;
+-  el.innerHTML=ms.map((m,i)=>{const s=m.stats||{};return '<div class="model-card '+(m.available?'':'disabled')+'"><div class="model-meta"><b>'+m.provider+'/'+m.model+'</b><span>'+(m.free?'FREE ':'')+(m.available?'READY':'CONFIG')+'</span></div><small>'+m.roles.join(' · ')+'</small><div class="model-stats">Success '+((s.success_rate||0)*100).toFixed(1)+'% · Latency '+(s.latency||0).toFixed(1)+'s · Failures '+(s.fail||0)+' · Score '+(m.score??'—')+'</div><div class="model-actions"><label>Priority <input id="pri'+i+'" type="number" value="'+m.priority+'"></label><button class="mini" onclick="saveModel('+i+')">Save</button></div></div>';}).join('');
++  el.innerHTML=ms.map((m,i)=>{const s=m.stats||{};return '<div class="model-card '+(m.available?'':'disabled')+'"><div class="model-meta"><b>'+m.provider+'/'+m.model+'</b><span>'+(m.free?'БЕСПЛ. ':'')+(m.available?'ГОТОВА':'НАСТРОЙКА')+'</span></div><small>'+m.roles.join(' · ')+'</small><div class="model-stats">Успех '+((s.success_rate||0)*100).toFixed(1)+'% · Задержка '+(s.latency||0).toFixed(1)+'с · Сбои '+(s.fail||0)+'</div><div class="model-actions"><label>Приоритет <input id="pri'+i+'" type="number" value="'+m.priority+'"></label><button class="mini" onclick="saveModel('+i+')">Сохранить</button></div></div>';}).join('');
+ }
+ async function saveModel(i){const m=modelPoolCache[i];const priority=Number($('pri'+i).value);await api('/model-pool/'+encodeURIComponent(m.provider)+'/'+encodeURIComponent(m.model),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({priority})});await loadModelPool();renderModelManager();}
+-async function discoverModels(){const x=await(await api('/model-pool/discover',{method:'POST'})).json();alert('OpenRouter: added '+(x.added||0)+' models');await loadModelPool();renderModelManager();}
++async function discoverModels(){const x=await(await api('/model-pool/discover',{method:'POST'})).json();alert('OpenRouter: добавлено моделей — '+(x.added||0));await loadModelPool();renderModelManager();}
+ 
+-/* ---------- workspace inspect ---------- */
+-async function loadFiles(){try{const x=await(await api('/workspace/files')).json();$('files').innerHTML=x.files.map(f=>'<div class="file" data-path="'+encodeURIComponent(f)+'">'+f+'</div>').join('');document.querySelectorAll('#files .file').forEach(el=>el.onclick=()=>openFile(decodeURIComponent(el.dataset.path)));}catch(e){$('files').textContent='Workspace unavailable';}}
+-async function openFile(path){try{const x=await(await api('/workspace/file?path='+encodeURIComponent(path))).json();$('filename').textContent=x.path;$('filecontent').value=x.content;}catch(e){$('filecontent').value='Unable to read file';}}
+-async function loadGit(){try{$('git').textContent=(await(await api('/workspace/status')).json()).stdout||'Clean working tree';}catch(e){$('git').textContent='Workspace unavailable';}}
+-async function loadDiff(){try{const x=await(await api('/workspace/diff')).json();const d=x.diff;$('diff').textContent=typeof d==='string'?(d||'No changes'):JSON.stringify(d,null,2);}catch(e){$('diff').textContent='Workspace unavailable';}}
+-async function loadLearning(){try{const rows=await(await api('/learning')).json();$('learning').innerHTML=rows.length?rows.map(r=>'<div class="model-row"><b>'+r.model+'</b> · '+r.role+' · '+(r.success_rate*100).toFixed(1)+'% · '+r.latency.toFixed(1)+'s · '+r.tasks+' tasks</div>').join(''):'No task history yet.';}catch(e){$('learning').textContent='Unavailable';}}
+-async function refreshCircuits(){try{const r=await(await api('/circuit-breakers')).json();const box=$('circuitBreakers');if(!box)return;box.innerHTML='<div class="hint">Circuit breakers</div>';Object.entries(r.circuits||{}).forEach(([m,v])=>{const d=document.createElement('div');d.className='circuit '+v.state.replace('-','');d.textContent=m+' · '+v.state+(v.cooldown_remaining?' · '+v.cooldown_remaining+'s':'');box.appendChild(d);});}catch(e){}}
++/* ---------- файлы ---------- */
++async function loadFiles(){try{const x=await(await api('/workspace/files')).json();$('files').innerHTML=x.files.map(f=>'<div class="file" data-path="'+encodeURIComponent(f)+'">'+f+'</div>').join('');document.querySelectorAll('#files .file').forEach(el=>el.onclick=()=>openFile(decodeURIComponent(el.dataset.path)));}catch(e){$('files').textContent='Рабочая область недоступна';}}
++async function openFile(path){try{const x=await(await api('/workspace/file?path='+encodeURIComponent(path))).json();$('filename').textContent=x.path;$('filecontent').value=x.content;}catch(e){$('filecontent').value='Не удалось прочитать файл';}}
++async function loadGit(){try{$('git').textContent=(await(await api('/workspace/status')).json()).stdout||'Дерево чистое';}catch(e){$('git').textContent='Рабочая область недоступна';}}
++async function loadDiff(){try{const x=await(await api('/workspace/diff')).json();const d=x.diff;$('diff').textContent=typeof d==='string'?(d||'Нет изменений'):JSON.stringify(d,null,2);}catch(e){$('diff').textContent='Рабочая область недоступна';}}
++async function loadLearning(){try{const rows=await(await api('/learning')).json();$('learning').innerHTML=rows.length?rows.map(r=>'<div class="model-row"><b>'+r.model+'</b> · '+r.role+' · '+(r.success_rate*100).toFixed(1)+'% · '+r.latency.toFixed(1)+'с · '+r.tasks+' задач</div>').join(''):'История задач пока пуста.';}catch(e){$('learning').textContent='Недоступно';}}
++async function refreshCircuits(){try{const r=await(await api('/circuit-breakers')).json();const box=$('circuitBreakers');if(!box)return;box.innerHTML='<div class="hint">Предохранители</div>';Object.entries(r.circuits||{}).forEach(([m,v])=>{const d=document.createElement('div');d.className='circuit '+v.state.replace('-','');d.textContent=m+' · '+v.state+(v.cooldown_remaining?' · '+v.cooldown_remaining+'с':'');box.appendChild(d);});}catch(e){}}
+ 
+-/* ---------- sessions ---------- */
+-async function loadSessions(){try{const ss=await(await api('/sessions')).json();const box=$('sessionList');if(box)box.innerHTML=ss.slice().reverse().map(s=>'<div class="file" title="'+s.id+'">['+s.mode+'] '+(s.task||s.id)+' <small>· '+s.events+' ev.</small></div>').join('')||'No sessions yet.';}catch(e){const box=$('sessionList');if(box)box.textContent='Unavailable';}}
++/* ---------- история диалогов ---------- */
++function replayAgent(sess){
++  const ev=sess.events||[];
++  const task=sess.task||(ev.find(e=>e.kind==='run.started')?'':'')||'(без названия)';
++  bubble('agentThread','user',md(task));
++  const body=bubble('agentThread','assistant','');
++  const act=document.createElement('div');act.className='agent-activity';
++  const fin=document.createElement('div');fin.className='agent-final';
++  body.append(act,fin);agentActivity=act;agentFinal=fin;
++  ev.forEach(e=>{if(e.kind!=='run.started')agentEvent(e);});
++  const last=[...ev].reverse().find(e=>e.kind==='run.completed');
++  if(last){fin.innerHTML='<div class="final-good">✅ Диалог из истории ('+(last.status||'завершён')+')</div>';}
++}
++function replayChat(sess){
++  const ev=sess.events||[];
++  chatHistory=[];chatSession=sess.id;
++  threadClear('chatThread','');
++  ev.forEach(e=>{
++    if(e.kind==='chat.user'){bubble('chatThread','user',md(e.message));chatHistory.push({role:'user',content:e.message});}
++    else if(e.kind==='chat.assistant'){bubble('chatThread','assistant',md(e.message));chatHistory.push({role:'assistant',content:e.message});}
++  });
++}
++async function openSession(id){
++  try{
++    const sess=await(await api('/sessions/'+id)).json();
++    const ev=sess.events||[];
++    const isChat=(sess.mode==='chat')||ev.some(e=>e.kind==='chat.user');
++    if(isChat){newChat();replayChat(sess);setView('chat');}
++    else{if(socket)try{socket.close();}catch(_){}threadClear('agentThread','');currentSession=sess.id;currentJob=null;replayAgent(sess);setView('agent');}
++  }catch(e){alert('Не удалось открыть диалог: '+e.message);}
++}
++async function loadSessions(){try{const ss=await(await api('/sessions')).json();const box=$('sessionList');if(box){box.innerHTML=ss.slice().reverse().map(s=>'<div class="file session-item" data-id="'+s.id+'" title="'+s.id+'">['+(s.mode==='chat'?'чат':'агент')+'] '+esc(s.task||s.id)+' <small>· '+s.events+' соб.</small></div>').join('')||'Диалогов пока нет.';box.querySelectorAll('.session-item').forEach(el=>el.onclick=()=>openSession(el.dataset.id));}}catch(e){const box=$('sessionList');if(box)box.textContent='Недоступно';}}
+ 
+-/* ---------- setup / health ---------- */
++/* ---------- диагностика / состояние ---------- */
+ function openSetup(){$('setupModal').classList.remove('hidden');runDiagnostics();}
+ function closeSetup(){$('setupModal').classList.add('hidden');}
+-async function runDiagnostics(){const el=$('setupChecks');el.textContent='Checking…';try{const d=await(await api('/diagnostics')).json();el.innerHTML=Object.entries(d.checks||{}).map(([k,v])=>'<div class="setup-row"><b>'+k+'</b><span class="'+(v?'ok':'error')+'">'+(v?'READY':'CONFIGURE')+'</span></div>').join('')+(d.ok?'<p class="ok">Core runtime ready.</p>':'<p class="error">Claude Code, workspace or persistence is not ready.</p>');}catch(e){el.textContent='Authentication required or server unavailable.';}}
++const CHECK_NAMES={workspace:'Рабочая область',git:'Git',claude_code:'Claude Code (CLI)',anthropic:'Claude (API)',openai:'OpenAI',gemini:'Gemini',groq:'Groq',openrouter:'OpenRouter',ollama:'Ollama (локально)',github:'GitHub',job_persistence:'Хранилище задач',jobs:'Задачи',api:'API'};
++async function runDiagnostics(){const el=$('setupChecks');el.textContent='Проверка…';try{const d=await(await api('/diagnostics')).json();el.innerHTML=Object.entries(d.checks||{}).map(([k,v])=>'<div class="setup-row"><b>'+(CHECK_NAMES[k]||k)+'</b><span class="'+(v?'ok':'error')+'">'+(v?'ГОТОВО':'НАСТРОИТЬ')+'</span></div>').join('')+(d.ok?'<p class="ok">Ядро готово к работе.</p>':'<p class="error">Не готовы: рабочая область, хранилище или ни одного провайдера.</p>');}catch(e){el.textContent='Нужен вход или сервер недоступен.';}}
+ async function load(){
+-  try{const h=await fetch('/health');const ok=h.ok&&(await h.json()).status==='ok';$('health').textContent=ok?'● ONLINE':'● OFFLINE';$('health').className='status '+(ok?'ok':'error');}catch(e){$('health').textContent='● OFFLINE';}
++  try{const h=await fetch('/health');const ok=h.ok&&(await h.json()).status==='ok';$('health').textContent=ok?'● ОНЛАЙН':'● ОФЛАЙН';$('health').className='status '+(ok?'ok':'error');}catch(e){$('health').textContent='● ОФЛАЙН';}
+   try{await loadModelPool();}catch(e){}
+-  try{const ss=await(await api('/sessions')).json();$('sessions').innerHTML=ss.slice(-8).reverse().map(s=>'<div title="'+s.id+'">'+(s.task||s.id)+'</div>').join('');}catch(e){}
++  try{const ss=await(await api('/sessions')).json();const box=$('sessions');if(box){box.innerHTML=ss.slice(-8).reverse().map(s=>'<div class="recent-item" data-id="'+s.id+'" title="'+esc(s.task||s.id)+'">'+esc(s.task||s.id)+'</div>').join('');box.querySelectorAll('.recent-item').forEach(el=>el.onclick=()=>openSession(el.dataset.id));}}catch(e){}
+ }
+ 
+-autoGrow($('agentInput'));autoGrow($('chatInput'));
+-load();
++/* ---------- запуск ---------- */
++function boot(){
++  autoGrow($('agentInput'));autoGrow($('chatInput'));
++  load();
++}
++async function init(){
++  if(!token){showLogin();return;}
++  try{
++    const r=await fetch('/auth/check',{headers:{'Authorization':'Bearer '+token}});
++    if(r.ok){hideLogin();boot();}
++    else{showLogin('Токен устарел. Введите заново.');}
++  }catch(e){boot();}
++}
++const _lt=$('loginToken');if(_lt)_lt.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();doLogin();}});
++init();
+diff --git a/web/index.html b/web/index.html
+index 794471a..c0a6856 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -3,51 +3,53 @@
+ <head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width,initial-scale=1">
+-<title>ANS Agent</title>
++<title>ANS Агент</title>
+ <link rel="stylesheet" href="/web/style.css">
+ </head>
+ <body>
+-<aside class="sidebar">
+-  <div class="brand">ANS <small>AGENT</small></div>
+-  <div class="section">WORKSPACE</div>
+-  <button class="nav active" data-view="agent">◈ Agent</button>
+-  <button class="nav" data-view="chat">◇ Chat</button>
+-  <button class="nav" data-view="workspace">◫ Workspace</button>
+-  <button class="nav" data-view="models">◉ Models</button>
+-  <button class="nav" data-view="sessions">☰ Sessions</button>
+-  <div class="section">RECENT</div>
++<button id="menuBtn" class="menu-btn" onclick="toggleSidebar()" aria-label="Меню">☰</button>
++<aside class="sidebar" id="sidebar">
++  <div class="brand">ANS <small>АГЕНТ</small></div>
++  <div class="section">РАБОЧАЯ ЗОНА</div>
++  <button class="nav active" data-view="agent">◈ Агент</button>
++  <button class="nav" data-view="chat">◇ Чат</button>
++  <button class="nav" data-view="workspace">◫ Файлы</button>
++  <button class="nav" data-view="models">◉ Модели</button>
++  <button class="nav" data-view="sessions">☰ Диалоги</button>
++  <div class="section">НЕДАВНИЕ</div>
+   <div id="sessions" class="recent"></div>
+ </aside>
+ 
+ <main>
+   <header>
+     <div>
+-      <div class="eyebrow">WORKSPACE / ANS</div>
+-      <h1 id="viewTitle">Agent</h1>
++      <div class="eyebrow">РАБОЧАЯ ЗОНА / ANS</div>
++      <h1 id="viewTitle">Агент</h1>
+     </div>
+     <div class="head-actions">
+-      <span id="health" class="status">● CONNECTING</span>
+-      <button class="mini" onclick="openSetup()">Setup</button>
++      <span id="health" class="status">● ПОДКЛЮЧЕНИЕ</span>
++      <button class="mini" onclick="openSetup()">Диагностика</button>
++      <button class="mini" onclick="logout()">Выход</button>
+     </div>
+   </header>
+ 
+-  <!-- ===================== AGENT (conversational) ===================== -->
++  <!-- ===================== АГЕНТ ===================== -->
+   <section class="view" data-view="agent">
+     <div class="chat-wrap">
+       <div class="chat-bar">
+-        <select id="agentMode" title="Режим"><option value="agent">Agent</option><option value="autopilot">Autopilot</option></select>
+-        <select id="policy" title="Политика роутинга"><option value="balanced">Balanced</option><option value="cheap">Cheap</option><option value="quality">Quality</option></select>
+-        <select id="profile" title="Профиль"><option value="developer">Developer</option><option value="game_developer">Game Dev</option><option value="researcher">Researcher</option><option value="budget">Budget</option></select>
+-        <input id="budget" type="number" min="0" step="0.01" placeholder="$ budget">
+-        <input id="agentWorkspace" placeholder="workspace (опц.)" title="Отдельная папка задачи внутри workspace">
+-        <span id="runstatus" class="status">IDLE</span>
+-        <button class="mini" onclick="cancelJob()">Stop</button>
+-        <button class="mini" onclick="newAgent()">New</button>
++        <select id="agentMode" title="Режим работы"><option value="agent">Агент</option><option value="autopilot">Автопилот</option></select>
++        <select id="policy" title="Политика выбора модели"><option value="balanced">Баланс</option><option value="cheap">Экономно</option><option value="quality">Качество</option></select>
++        <select id="profile" title="Профиль"><option value="developer">Разработка</option><option value="game_developer">Геймдев</option><option value="researcher">Исследование</option><option value="budget">Бюджет</option></select>
++        <input id="budget" type="number" min="0" step="0.01" placeholder="$ лимит">
++        <input id="agentWorkspace" placeholder="папка задачи (опц.)" title="Отдельная папка внутри рабочей области">
++        <span id="runstatus" class="status">ОЖИДАНИЕ</span>
++        <button class="mini" onclick="cancelJob()">Стоп</button>
++        <button class="mini" onclick="newAgent()">Новый</button>
+       </div>
+-      <div id="agentThread" class="chat-thread"><div class="empty">Опиши задачу — агент спланирует, выполнит её инструментами (файлы, терминал, git, поиск) и покажет ход работы в реальном времени.</div></div>
++      <div id="agentThread" class="chat-thread"><div class="empty">Опиши задачу — агент составит план, выполнит её инструментами (файлы, терминал, git, поиск в интернете) и покажет ход работы в реальном времени.</div></div>
+       <div class="chat-input">
+-        <textarea id="agentInput" rows="1" placeholder="Что построить, починить, исследовать?  (Enter — запуск, Shift+Enter — перенос)"></textarea>
+-        <button class="primary" id="agentSend" onclick="startAgent()">Run</button>
++        <textarea id="agentInput" rows="1" placeholder="Что построить, починить, найти или исследовать?  (Enter — запуск, Shift+Enter — перенос строки)"></textarea>
++        <button class="primary" id="agentSend" onclick="startAgent()">Запуск</button>
+       </div>
+     </div>
+     <div id="approval" class="approval hidden">
+@@ -57,78 +59,90 @@
+     </div>
+   </section>
+ 
+-  <!-- ===================== CHAT (direct model) ===================== -->
++  <!-- ===================== ЧАТ ===================== -->
+   <section class="view" data-view="chat" hidden>
+     <div class="chat-wrap">
+       <div class="chat-bar">
+-        <select id="chatModel"><option value="">Auto (router)</option></select>
+-        <button class="mini" onclick="newChat()">New chat</button>
++        <select id="chatModel"><option value="">Авто (роутер)</option></select>
++        <button class="mini" onclick="newChat()">Новый чат</button>
+       </div>
+-      <div id="chatThread" class="chat-thread"><div class="empty">Прямой чат с выбранной моделью (без инструментов).</div></div>
++      <div id="chatThread" class="chat-thread"><div class="empty">Прямой диалог с выбранной моделью — без инструментов, просто разговор.</div></div>
+       <div class="chat-input">
+-        <textarea id="chatInput" rows="1" placeholder="Спроси что угодно…  (Enter — отправить, Shift+Enter — перенос)"></textarea>
+-        <button class="primary" id="chatSend" onclick="sendChat()">Send</button>
++        <textarea id="chatInput" rows="1" placeholder="Спроси что угодно…  (Enter — отправить, Shift+Enter — перенос строки)"></textarea>
++        <button class="primary" id="chatSend" onclick="sendChat()">Отправить</button>
+       </div>
+     </div>
+   </section>
+ 
+-  <!-- ===================== WORKSPACE (inspect) ===================== -->
++  <!-- ===================== ФАЙЛЫ ===================== -->
+   <section class="view" data-view="workspace" hidden>
+     <div class="layout">
+       <section class="center">
+         <div class="card">
+-          <div class="card-head"><span>DIFF</span><button class="mini" onclick="loadDiff()">Refresh</button></div>
+-          <pre id="diff">No diff loaded.</pre>
++          <div class="card-head"><span>ИЗМЕНЕНИЯ (DIFF)</span><button class="mini" onclick="loadDiff()">Обновить</button></div>
++          <pre id="diff">Нет загруженных изменений.</pre>
+         </div>
+         <div class="card">
+-          <div class="card-head"><span>GIT</span><button class="mini" onclick="loadGit()">Refresh</button></div>
+-          <pre id="git">Loading…</pre>
++          <div class="card-head"><span>GIT</span><button class="mini" onclick="loadGit()">Обновить</button></div>
++          <pre id="git">Загрузка…</pre>
+         </div>
+         <div class="card">
+-          <div class="card-head"><span>ADAPTIVE LEARNING</span><button class="mini" onclick="loadLearning()">Refresh</button></div>
+-          <div id="learning">No task history yet.</div>
+-          <div id="circuitBreakers" class="circuit-breakers"><div class="hint">Circuit breakers</div></div>
++          <div class="card-head"><span>ОБУЧЕНИЕ РОУТЕРА</span><button class="mini" onclick="loadLearning()">Обновить</button></div>
++          <div id="learning">История задач пока пуста.</div>
++          <div id="circuitBreakers" class="circuit-breakers"><div class="hint">Предохранители</div></div>
+         </div>
+       </section>
+       <aside class="right">
+         <div class="card">
+-          <div class="card-head"><span>PROJECT FILES</span><button class="mini" onclick="loadFiles()">Refresh</button></div>
+-          <div id="files" class="files">Loading…</div>
++          <div class="card-head"><span>ФАЙЛЫ ПРОЕКТА</span><button class="mini" onclick="loadFiles()">Обновить</button></div>
++          <div id="files" class="files">Загрузка…</div>
+         </div>
+         <div class="card editor">
+-          <div class="card-head"><span id="filename">FILE</span></div>
+-          <textarea id="filecontent" readonly>Select a file</textarea>
++          <div class="card-head"><span id="filename">ФАЙЛ</span></div>
++          <textarea id="filecontent" readonly>Выберите файл</textarea>
+         </div>
+       </aside>
+     </div>
+   </section>
+ 
+-  <!-- ===================== MODELS ===================== -->
++  <!-- ===================== МОДЕЛИ ===================== -->
+   <section class="view" data-view="models" hidden>
+     <div class="card">
+-      <div class="card-head"><span>MODEL POOL — распределение по ролям</span><span><button class="mini" onclick="refreshModels()">Refresh</button> <button class="mini" onclick="discoverModels()">Discover OpenRouter</button></span></div>
+-      <div id="models">Loading…</div>
++      <div class="card-head"><span>ПУЛ МОДЕЛЕЙ — распределение по ролям</span><span><button class="mini" onclick="refreshModels()">Обновить</button> <button class="mini" onclick="discoverModels()">Найти в OpenRouter</button></span></div>
++      <div id="models">Загрузка…</div>
+       <div id="modelManager" class="model-manager"></div>
+     </div>
+   </section>
+ 
+-  <!-- ===================== SESSIONS ===================== -->
++  <!-- ===================== ДИАЛОГИ ===================== -->
+   <section class="view" data-view="sessions" hidden>
+     <div class="card">
+-      <div class="card-head"><span>SESSIONS</span><button class="mini" onclick="loadSessions()">Refresh</button></div>
+-      <div id="sessionList" class="files">Loading…</div>
++      <div class="card-head"><span>ДИАЛОГИ</span><button class="mini" onclick="loadSessions()">Обновить</button></div>
++      <div id="sessionList" class="files">Загрузка…</div>
+     </div>
+   </section>
+ </main>
+ 
+ <div id="setupModal" class="modal hidden">
+   <div class="modal-card">
+-    <div class="card-head"><span>ANS SETUP</span><button class="mini" onclick="closeSetup()">Close</button></div>
+-    <p>Runtime diagnostics</p>
+-    <div id="setupChecks">Checking…</div>
+-    <button class="primary" onclick="runDiagnostics()">Recheck</button>
++    <div class="card-head"><span>ДИАГНОСТИКА ANS</span><button class="mini" onclick="closeSetup()">Закрыть</button></div>
++    <p>Состояние компонентов</p>
++    <div id="setupChecks">Проверка…</div>
++    <button class="primary" onclick="runDiagnostics()">Перепроверить</button>
+   </div>
+ </div>
++
++<!-- ===================== ВХОД ===================== -->
++<div id="loginModal" class="modal hidden">
++  <div class="modal-card login-card">
++    <div class="brand">ANS <small>АГЕНТ</small></div>
++    <p class="login-hint">Введите токен доступа, чтобы войти. Он хранится только в этом браузере.</p>
++    <input id="loginToken" type="password" placeholder="Токен доступа" autocomplete="current-password">
++    <button class="primary" id="loginBtn" onclick="doLogin()">Войти</button>
++    <div id="loginError" class="login-error"></div>
++  </div>
++</div>
++
+ <script src="/web/app.js"></script>
+ </body>
+ </html>
+diff --git a/web/style.css b/web/style.css
+index bac22c4..f69585f 100644
+--- a/web/style.css
++++ b/web/style.css
+@@ -61,3 +61,25 @@ main{display:block}
+ .final-steps{color:#b7c3cf;font-size:13px;line-height:1.6}
+ .final-obs{margin-top:8px}.final-obs summary{cursor:pointer;color:#8c96a2;font-size:11px}
+ .final-summary{color:#e6ebf1;line-height:1.55;margin-bottom:10px;padding:10px 12px;background:#12161b;border:1px solid #23303a;border-left:3px solid #4a90d9;border-radius:8px}
++
++/* ---- history / recent (clickable) ---- */
++.recent-item{padding:7px 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#8b939d;cursor:pointer;border-radius:6px}
++.recent-item:hover{background:#181c21;color:#fff}
++.session-item{cursor:pointer}
++
++/* ---- login ---- */
++.login-card{width:min(400px,92vw);text-align:center}
++.login-card .brand{margin:6px 0 18px}
++.login-hint{color:#8b939d;font-size:13px;line-height:1.5;margin:0 0 16px}
++#loginToken{width:100%;padding:12px;background:#14181d;border:1px solid #2a3037;color:#e9edf0;border-radius:8px;outline:0;font-size:15px;margin-bottom:12px}
++#loginBtn{width:100%;padding:12px}
++.login-error{color:#e77b7b;font-size:12px;margin-top:12px;min-height:16px}
++
++/* ---- mobile menu / drawer ---- */
++.menu-btn{display:none;position:fixed;top:12px;left:12px;z-index:15;background:#14181d;border:1px solid #2a3037;color:#dfe3e7;border-radius:8px;padding:8px 12px;font-size:16px}
++@media(max-width:950px){
++  .menu-btn{display:block}
++  main{padding-top:56px}
++  .sidebar{display:block;position:fixed;top:0;left:0;bottom:0;z-index:14;transform:translateX(-105%);transition:transform .2s ease;box-shadow:0 0 40px rgba(0,0,0,.6)}
++  .sidebar.open{transform:translateX(0)}
++}

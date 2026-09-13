@@ -3,51 +3,53 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ANS Agent</title>
+<title>ANS Агент</title>
 <link rel="stylesheet" href="/web/style.css">
 </head>
 <body>
-<aside class="sidebar">
-  <div class="brand">ANS <small>AGENT</small></div>
-  <div class="section">WORKSPACE</div>
-  <button class="nav active" data-view="agent">◈ Agent</button>
-  <button class="nav" data-view="chat">◇ Chat</button>
-  <button class="nav" data-view="workspace">◫ Workspace</button>
-  <button class="nav" data-view="models">◉ Models</button>
-  <button class="nav" data-view="sessions">☰ Sessions</button>
-  <div class="section">RECENT</div>
+<button id="menuBtn" class="menu-btn" onclick="toggleSidebar()" aria-label="Меню">☰</button>
+<aside class="sidebar" id="sidebar">
+  <div class="brand">ANS <small>АГЕНТ</small></div>
+  <div class="section">РАБОЧАЯ ЗОНА</div>
+  <button class="nav active" data-view="agent">◈ Агент</button>
+  <button class="nav" data-view="chat">◇ Чат</button>
+  <button class="nav" data-view="workspace">◫ Файлы</button>
+  <button class="nav" data-view="models">◉ Модели</button>
+  <button class="nav" data-view="sessions">☰ Диалоги</button>
+  <div class="section">НЕДАВНИЕ</div>
   <div id="sessions" class="recent"></div>
 </aside>
 
 <main>
   <header>
     <div>
-      <div class="eyebrow">WORKSPACE / ANS</div>
-      <h1 id="viewTitle">Agent</h1>
+      <div class="eyebrow">РАБОЧАЯ ЗОНА / ANS</div>
+      <h1 id="viewTitle">Агент</h1>
     </div>
     <div class="head-actions">
-      <span id="health" class="status">● CONNECTING</span>
-      <button class="mini" onclick="openSetup()">Setup</button>
+      <span id="health" class="status">● ПОДКЛЮЧЕНИЕ</span>
+      <button class="mini" onclick="openSetup()">Диагностика</button>
+      <button class="mini" onclick="logout()">Выход</button>
     </div>
   </header>
 
-  <!-- ===================== AGENT (conversational) ===================== -->
+  <!-- ===================== АГЕНТ ===================== -->
   <section class="view" data-view="agent">
     <div class="chat-wrap">
       <div class="chat-bar">
-        <select id="agentMode" title="Режим"><option value="agent">Agent</option><option value="autopilot">Autopilot</option></select>
-        <select id="policy" title="Политика роутинга"><option value="balanced">Balanced</option><option value="cheap">Cheap</option><option value="quality">Quality</option></select>
-        <select id="profile" title="Профиль"><option value="developer">Developer</option><option value="game_developer">Game Dev</option><option value="researcher">Researcher</option><option value="budget">Budget</option></select>
-        <input id="budget" type="number" min="0" step="0.01" placeholder="$ budget">
-        <input id="agentWorkspace" placeholder="workspace (опц.)" title="Отдельная папка задачи внутри workspace">
-        <span id="runstatus" class="status">IDLE</span>
-        <button class="mini" onclick="cancelJob()">Stop</button>
-        <button class="mini" onclick="newAgent()">New</button>
+        <select id="agentMode" title="Режим работы"><option value="agent">Агент</option><option value="autopilot">Автопилот</option></select>
+        <select id="policy" title="Политика выбора модели"><option value="balanced">Баланс</option><option value="cheap">Экономно</option><option value="quality">Качество</option></select>
+        <select id="profile" title="Профиль"><option value="developer">Разработка</option><option value="game_developer">Геймдев</option><option value="researcher">Исследование</option><option value="budget">Бюджет</option></select>
+        <input id="budget" type="number" min="0" step="0.01" placeholder="$ лимит">
+        <input id="agentWorkspace" placeholder="папка задачи (опц.)" title="Отдельная папка внутри рабочей области">
+        <span id="runstatus" class="status">ОЖИДАНИЕ</span>
+        <button class="mini" onclick="cancelJob()">Стоп</button>
+        <button class="mini" onclick="newAgent()">Новый</button>
       </div>
-      <div id="agentThread" class="chat-thread"><div class="empty">Опиши задачу — агент спланирует, выполнит её инструментами (файлы, терминал, git, поиск) и покажет ход работы в реальном времени.</div></div>
+      <div id="agentThread" class="chat-thread"><div class="empty">Опиши задачу — агент составит план, выполнит её инструментами (файлы, терминал, git, поиск в интернете) и покажет ход работы в реальном времени.</div></div>
       <div class="chat-input">
-        <textarea id="agentInput" rows="1" placeholder="Что построить, починить, исследовать?  (Enter — запуск, Shift+Enter — перенос)"></textarea>
-        <button class="primary" id="agentSend" onclick="startAgent()">Run</button>
+        <textarea id="agentInput" rows="1" placeholder="Что построить, починить, найти или исследовать?  (Enter — запуск, Shift+Enter — перенос строки)"></textarea>
+        <button class="primary" id="agentSend" onclick="startAgent()">Запуск</button>
       </div>
     </div>
     <div id="approval" class="approval hidden">
@@ -57,78 +59,90 @@
     </div>
   </section>
 
-  <!-- ===================== CHAT (direct model) ===================== -->
+  <!-- ===================== ЧАТ ===================== -->
   <section class="view" data-view="chat" hidden>
     <div class="chat-wrap">
       <div class="chat-bar">
-        <select id="chatModel"><option value="">Auto (router)</option></select>
-        <button class="mini" onclick="newChat()">New chat</button>
+        <select id="chatModel"><option value="">Авто (роутер)</option></select>
+        <button class="mini" onclick="newChat()">Новый чат</button>
       </div>
-      <div id="chatThread" class="chat-thread"><div class="empty">Прямой чат с выбранной моделью (без инструментов).</div></div>
+      <div id="chatThread" class="chat-thread"><div class="empty">Прямой диалог с выбранной моделью — без инструментов, просто разговор.</div></div>
       <div class="chat-input">
-        <textarea id="chatInput" rows="1" placeholder="Спроси что угодно…  (Enter — отправить, Shift+Enter — перенос)"></textarea>
-        <button class="primary" id="chatSend" onclick="sendChat()">Send</button>
+        <textarea id="chatInput" rows="1" placeholder="Спроси что угодно…  (Enter — отправить, Shift+Enter — перенос строки)"></textarea>
+        <button class="primary" id="chatSend" onclick="sendChat()">Отправить</button>
       </div>
     </div>
   </section>
 
-  <!-- ===================== WORKSPACE (inspect) ===================== -->
+  <!-- ===================== ФАЙЛЫ ===================== -->
   <section class="view" data-view="workspace" hidden>
     <div class="layout">
       <section class="center">
         <div class="card">
-          <div class="card-head"><span>DIFF</span><button class="mini" onclick="loadDiff()">Refresh</button></div>
-          <pre id="diff">No diff loaded.</pre>
+          <div class="card-head"><span>ИЗМЕНЕНИЯ (DIFF)</span><button class="mini" onclick="loadDiff()">Обновить</button></div>
+          <pre id="diff">Нет загруженных изменений.</pre>
         </div>
         <div class="card">
-          <div class="card-head"><span>GIT</span><button class="mini" onclick="loadGit()">Refresh</button></div>
-          <pre id="git">Loading…</pre>
+          <div class="card-head"><span>GIT</span><button class="mini" onclick="loadGit()">Обновить</button></div>
+          <pre id="git">Загрузка…</pre>
         </div>
         <div class="card">
-          <div class="card-head"><span>ADAPTIVE LEARNING</span><button class="mini" onclick="loadLearning()">Refresh</button></div>
-          <div id="learning">No task history yet.</div>
-          <div id="circuitBreakers" class="circuit-breakers"><div class="hint">Circuit breakers</div></div>
+          <div class="card-head"><span>ОБУЧЕНИЕ РОУТЕРА</span><button class="mini" onclick="loadLearning()">Обновить</button></div>
+          <div id="learning">История задач пока пуста.</div>
+          <div id="circuitBreakers" class="circuit-breakers"><div class="hint">Предохранители</div></div>
         </div>
       </section>
       <aside class="right">
         <div class="card">
-          <div class="card-head"><span>PROJECT FILES</span><button class="mini" onclick="loadFiles()">Refresh</button></div>
-          <div id="files" class="files">Loading…</div>
+          <div class="card-head"><span>ФАЙЛЫ ПРОЕКТА</span><button class="mini" onclick="loadFiles()">Обновить</button></div>
+          <div id="files" class="files">Загрузка…</div>
         </div>
         <div class="card editor">
-          <div class="card-head"><span id="filename">FILE</span></div>
-          <textarea id="filecontent" readonly>Select a file</textarea>
+          <div class="card-head"><span id="filename">ФАЙЛ</span></div>
+          <textarea id="filecontent" readonly>Выберите файл</textarea>
         </div>
       </aside>
     </div>
   </section>
 
-  <!-- ===================== MODELS ===================== -->
+  <!-- ===================== МОДЕЛИ ===================== -->
   <section class="view" data-view="models" hidden>
     <div class="card">
-      <div class="card-head"><span>MODEL POOL — распределение по ролям</span><span><button class="mini" onclick="refreshModels()">Refresh</button> <button class="mini" onclick="discoverModels()">Discover OpenRouter</button></span></div>
-      <div id="models">Loading…</div>
+      <div class="card-head"><span>ПУЛ МОДЕЛЕЙ — распределение по ролям</span><span><button class="mini" onclick="refreshModels()">Обновить</button> <button class="mini" onclick="discoverModels()">Найти в OpenRouter</button></span></div>
+      <div id="models">Загрузка…</div>
       <div id="modelManager" class="model-manager"></div>
     </div>
   </section>
 
-  <!-- ===================== SESSIONS ===================== -->
+  <!-- ===================== ДИАЛОГИ ===================== -->
   <section class="view" data-view="sessions" hidden>
     <div class="card">
-      <div class="card-head"><span>SESSIONS</span><button class="mini" onclick="loadSessions()">Refresh</button></div>
-      <div id="sessionList" class="files">Loading…</div>
+      <div class="card-head"><span>ДИАЛОГИ</span><button class="mini" onclick="loadSessions()">Обновить</button></div>
+      <div id="sessionList" class="files">Загрузка…</div>
     </div>
   </section>
 </main>
 
 <div id="setupModal" class="modal hidden">
   <div class="modal-card">
-    <div class="card-head"><span>ANS SETUP</span><button class="mini" onclick="closeSetup()">Close</button></div>
-    <p>Runtime diagnostics</p>
-    <div id="setupChecks">Checking…</div>
-    <button class="primary" onclick="runDiagnostics()">Recheck</button>
+    <div class="card-head"><span>ДИАГНОСТИКА ANS</span><button class="mini" onclick="closeSetup()">Закрыть</button></div>
+    <p>Состояние компонентов</p>
+    <div id="setupChecks">Проверка…</div>
+    <button class="primary" onclick="runDiagnostics()">Перепроверить</button>
   </div>
 </div>
+
+<!-- ===================== ВХОД ===================== -->
+<div id="loginModal" class="modal hidden">
+  <div class="modal-card login-card">
+    <div class="brand">ANS <small>АГЕНТ</small></div>
+    <p class="login-hint">Введите токен доступа, чтобы войти. Он хранится только в этом браузере.</p>
+    <input id="loginToken" type="password" placeholder="Токен доступа" autocomplete="current-password">
+    <button class="primary" id="loginBtn" onclick="doLogin()">Войти</button>
+    <div id="loginError" class="login-error"></div>
+  </div>
+</div>
+
 <script src="/web/app.js"></script>
 </body>
 </html>

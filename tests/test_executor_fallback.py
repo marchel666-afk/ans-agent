@@ -12,9 +12,9 @@ def test_executor_provider_fallback(monkeypatch, tmp_path):
             if self.error:
                 raise RuntimeError(self.error)
             text = self.text
-            if "Create an ordered implementation plan" in prompt:
+            if "пошаговый план" in prompt:
                 text = "1. create file"
-            elif "Return PASS or FAIL first" in prompt:
+            elif "PASS" in prompt and "FAIL" in prompt:
                 text = "PASS"
             return type("R", (), {"text": text})()
     class FakeLoop:

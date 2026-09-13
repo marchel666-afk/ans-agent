@@ -31,8 +31,9 @@ services:
     security_opt:
       - no-new-privileges:true
     ports:
-      # Bind ONLY to the VPN interface (set ANS_BIND in .env). Never 0.0.0.0.
-      - "${ANS_BIND:-127.0.0.1}:8080:8080"
+      # Bind ONLY to the VPN interface / localhost (set ANS_BIND in .env). Never 0.0.0.0.
+      # Host port is ANS_HOST_PORT (default 8899 to avoid clashing with common 8080 panels).
+      - "${ANS_BIND:-127.0.0.1}:${ANS_HOST_PORT:-8899}:8080"
     healthcheck:
       test: ["CMD","curl","-fsS","http://127.0.0.1:8080/health"]
       interval: 30s

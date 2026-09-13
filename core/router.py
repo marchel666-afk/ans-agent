@@ -55,7 +55,7 @@ class ModelRouter:
     if m.provider=="openrouter" and m.model=="openrouter/free": m.free=True
   return self.pool()
  def _available(self,m):
-  keys={"anthropic":"ANTHROPIC_API_KEY","openai":"OPENAI_API_KEY","google":"GEMINI_API_KEY","openrouter":"OPENROUTER_API_KEY"}
+  keys={"anthropic":"ANTHROPIC_API_KEY","openai":"OPENAI_API_KEY","google":"GEMINI_API_KEY","openrouter":"OPENROUTER_API_KEY","groq":"GROQ_API_KEY"}
   if m.provider=="ollama":
    try:
     import urllib.request, json
@@ -72,7 +72,10 @@ class ModelRouter:
    except Exception:
     return False
   if m.provider=="anthropic":
-   return bool(os.getenv("ANTHROPIC_API_KEY")) or self._claude_cli_available()
+   # The local CLI model is only usable where the 'claude' binary exists; every
+   # other Anthropic model routes through the API and needs a key.
+   if m.model=="claude-code": return self._claude_cli_available()
+   return bool(os.getenv("ANTHROPIC_API_KEY"))
   env=keys.get(m.provider)
   if env:
    return bool(os.getenv(env))

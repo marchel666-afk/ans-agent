@@ -13,12 +13,21 @@ class ModelRegistry:
     def for_role(self, role: str) -> list[ModelCandidate]:
         return sorted((m for m in self.models if role in m.roles), key=lambda m: m.priority)
 
+    ALL_ROLES = {"executor", "tester", "fixer", "planner", "architect", "reviewer", "researcher", "judge"}
+
     @classmethod
     def default(cls) -> "ModelRegistry":
+        import os
         r = cls()
-        r.register(ModelCandidate("anthropic", "claude-code", {"executor", "tester", "fixer", "planner", "architect", "reviewer", "researcher", "judge"}, tool_capable=True, priority=1))
-        r.register(ModelCandidate("openai", "gpt", {"planner", "architect", "reviewer", "judge"}, priority=5))
-        r.register(ModelCandidate("google", "gemini", {"researcher", "planner", "reviewer"}, priority=10))
-        r.register(ModelCandidate("openrouter", "openrouter/free", {"researcher", "reviewer", "planner"}, free=True, priority=50))
-        r.register(ModelCandidate("ollama", "local", {"researcher", "planner", "architect", "reviewer", "judge", "executor", "tester", "fixer"}, free=True, tool_capable=True, priority=80))
+        # Local Claude Code CLI (dev machines only; the model name 'claude-code'
+        # routes to the CLI adapter). Highest static priority when present.
+        r.register(ModelCandidate("anthropic", "claude-code", set(cls.ALL_ROLES), tool_capable=True, priority=1))
+        # Native Anthropic API (Claude) — used when ANTHROPIC_API_KEY is set.
+        r.register(ModelCandidate("anthropic", os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"), set(cls.ALL_ROLES), tool_capable=True, priority=2))
+        # Groq — free + very fast; good default executor when no premium key.
+        r.register(ModelCandidate("groq", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"), set(cls.ALL_ROLES), tool_capable=True, priority=8))
+        r.register(ModelCandidate("openai", "gpt", {"planner", "architect", "reviewer", "judge", "executor", "tester", "fixer"}, tool_capable=True, priority=5))
+        r.register(ModelCandidate("google", "gemini", {"researcher", "planner", "reviewer", "judge", "executor"}, tool_capable=True, priority=10))
+        r.register(ModelCandidate("openrouter", "openrouter/free", {"researcher", "reviewer", "planner", "executor"}, free=True, tool_capable=True, priority=50))
+        r.register(ModelCandidate("ollama", "local", set(cls.ALL_ROLES), free=True, tool_capable=True, priority=80))
         return r

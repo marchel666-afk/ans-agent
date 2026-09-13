@@ -79,8 +79,10 @@ def startup(_:None=Depends(auth)):
       "workspace":os.path.isdir(WORKSPACE),
       "git":os.path.isdir(os.path.join(WORKSPACE,".git")),
       "claude_code":bool(a.get("claude-code")),
+      "anthropic":bool(a.get("anthropic")),
       "openai":bool(a.get("openai")),
       "gemini":bool(a.get("gemini")),
+      "groq":bool(a.get("groq")),
       "openrouter":bool(a.get("openrouter")),
       "ollama":bool(a.get("ollama")),
       "github":github.enabled(),
@@ -93,10 +95,25 @@ def startup(_:None=Depends(auth)):
 def health():
     return {"status":"ok","service":"ans-agent","workspace":os.path.isdir(WORKSPACE),"github":github.enabled(),"jobs":"sqlite"}
 
+@app.get("/auth/check")
+def auth_check(_:None=Depends(auth)):
+    # Lets the login page validate a token before storing it.
+    return {"ok":True}
+
+@app.on_event("startup")
+def _discover_free_models():
+    # If OpenRouter is configured, enrich the pool with its free models in the
+    # background so the router has good/fast/free options out of the box.
+    if not os.getenv("OPENROUTER_API_KEY"): return
+    def _bg():
+        try: router.discover_openrouter(limit=60)
+        except Exception: pass
+    import threading; threading.Thread(target=_bg,daemon=True).start()
+
 @app.get("/diagnostics")
 def diagnostics(_:None=Depends(auth)):
     adapters=Orchestrator(router,WORKSPACE).adapters
-    checks={"workspace":os.path.isdir(WORKSPACE),"claude_code":bool(adapters.get("claude-code")),"openai":bool(adapters.get("openai")),"gemini":bool(adapters.get("gemini")),"openrouter":bool(adapters.get("openrouter")),"ollama":bool(adapters.get("ollama")),"github":github.enabled(),"job_persistence":os.path.exists(jobs.db_path)}
+    checks={"workspace":os.path.isdir(WORKSPACE),"claude_code":bool(adapters.get("claude-code")),"anthropic":bool(adapters.get("anthropic")),"openai":bool(adapters.get("openai")),"gemini":bool(adapters.get("gemini")),"groq":bool(adapters.get("groq")),"openrouter":bool(adapters.get("openrouter")),"ollama":bool(adapters.get("ollama")),"github":github.enabled(),"job_persistence":os.path.exists(jobs.db_path)}
     routing_ready=bool(router.rank("planner")) and bool(router.rank("executor",requires_tools=True))
     return {"ok":checks["workspace"] and checks["job_persistence"] and routing_ready,"checks":checks,"routing":{"planner":bool(router.rank("planner")),"executor":bool(router.rank("executor",requires_tools=True))}}
 
@@ -185,7 +202,7 @@ def route(req:RouteRequest,_:None=Depends(auth)):
     return router.choose(req.role,requires_tools=req.requires_tools,prefer_free=req.prefer_free).__dict__
 
 def _chat_prompt(history,message):
-    lines=[]
+    lines=["Ты — полезный универсальный ИИ-ассистент ANS. Отвечай по-русски, ясно и по делу.",""]
     for h in (history or [])[-20:]:
         role=h.get("role","user"); content=(h.get("content") or "").strip()
         if not content: continue

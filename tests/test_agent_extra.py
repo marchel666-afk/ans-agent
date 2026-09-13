@@ -44,9 +44,9 @@ def test_orchestrator_cancels_before_step(tmp_path):
 def test_orchestrator_returns_summary(tmp_path, monkeypatch):
     class A:
         def complete(self, p, **k):
-            if "implementation plan" in p:
+            if "пошаговый план" in p:
                 t = "1. only step"
-            elif "PASS or FAIL" in p:
+            elif "PASS" in p and "FAIL" in p:
                 t = "PASS looks good"
             else:
                 t = "Итог: задача выполнена, файл обновлён."

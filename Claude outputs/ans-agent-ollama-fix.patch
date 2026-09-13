@@ -1,0 +1,596 @@
+From fc355d4766a6dbb9511d9c5abadbcbc9d4c543df Mon Sep 17 00:00:00 2001
+From: MaR4eJl <marchel666@gmail.com>
+Date: Sun, 13 Sep 2026 06:46:48 +0000
+Subject: [PATCH] fix: reliable Ollama fallback, deterministic routing, and
+ green test suite
+
+Root causes fixed (was 22 failed / 28 passed -> 64 passed / 0 failed):
+
+- ModelRegistry.__init__ now accepts an optional candidate iterable, so
+  ModelRegistry([...]) works again (this was the "takes 1 positional
+  argument but 2 were given" error breaking ~13 tests).
+- router._available: providers without a required API key (local/custom
+  pools) are treated as available; Anthropic stays key-or-CLI, OpenAI/
+  Gemini/OpenRouter still require their key, Ollama still health-checks.
+- router.rank: actually sweep and clear expired cooldowns (open -> half-open)
+  from both memory and the persisted provider_health table (dead code before).
+- router._persist: use setdefault so a provider's first success no longer
+  raises KeyError; health/stats tables are (re)created lazily so a repointed
+  db stays correct.
+- OllamaAdapter: send /api/tags as a urllib Request (keeps monkeypatched
+  urlopen observable) while production traffic uses the proxy-free opener so
+  loopback never goes through HTTP(S)_PROXY.
+- orchestrator.run: define `manager` before the executor try/except
+  (UnboundLocalError when running without a JobManager).
+- jobs.submit: support sub-second/float timeouts instead of flooring to 1s.
+- app.py /run: re-emit job.created into the session (was dropped).
+- SessionStore: in-memory session cache for consistent event replay.
+
+Env/config: python-dotenv loaded before providers are built (already in
+place); .env stays untracked via new .gitignore.
+
+Tests: added tests/conftest.py to isolate runtime DBs per test, plus
+tests/test_ollama_integration.py covering env loading, Ollama availability/
+model discovery/tag-prefix match, completion, malformed/timeout/connection
+errors, no-proxy transport, and Claude->Ollama weekly-limit fallback.
+
+No public APIs, providers, roles, fallback, or circuit breaker removed.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014JLsTFGmA8Mim6xfbGE3C7
+---
+ .gitignore                       |  16 +++
+ app.py                           |   1 +
+ core/adapters.py                 |   2 +-
+ core/jobs.py                     |   4 +-
+ core/orchestrator.py             |   4 +-
+ core/registry.py                 |   7 +-
+ core/router.py                   |  52 +++++----
+ core/session.py                  |   4 +-
+ tests/conftest.py                |  16 +++
+ tests/test_adaptive_fallback.py  |   8 +-
+ tests/test_executor_fallback.py  |   9 +-
+ tests/test_ollama_integration.py | 187 +++++++++++++++++++++++++++++++
+ tests/test_router.py             |   6 +-
+ 13 files changed, 281 insertions(+), 35 deletions(-)
+ create mode 100644 .gitignore
+ create mode 100644 tests/conftest.py
+ create mode 100644 tests/test_ollama_integration.py
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..a142d31
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,16 @@
++# Python
++__pycache__/
++*.py[cod]
++.venv/
++venv/
++*.egg-info/
++
++# Local secrets and runtime state
++.env
++data/
++workspace/
++
++# Test / tooling caches
++.pytest_cache/
++.mypy_cache/
++.ruff_cache/
+diff --git a/app.py b/app.py
+index e1aefee..80c9f39 100644
+--- a/app.py
++++ b/app.py
+@@ -288,6 +288,7 @@ async def run(req:RunRequest,_:None=Depends(auth)):
+             return result
+         job=jobs.submit(s.id,worker,timeout_seconds=req.timeout_seconds)
+         orch.job=job
++        emit("job.created","Agent job queued",job_id=job.id)
+         return {"session_id":s.id,"job_id":job.id,"status":job.status}
+     except Exception as e:
+         emit("run.failed",str(e)); raise HTTPException(500,str(e))
+diff --git a/core/adapters.py b/core/adapters.py
+index 2301458..ea19fbf 100644
+--- a/core/adapters.py
++++ b/core/adapters.py
+@@ -69,7 +69,7 @@ class OllamaAdapter:
+         if self.model:
+             return self.model
+         try:
+-            with self._open(self.base_url+"/api/tags", timeout=2) as r: data=json.load(r)
++            with self._open(urllib.request.Request(self.base_url+"/api/tags"), timeout=2) as r: data=json.load(r)
+             models=data.get("models") or []
+             if models and models[0].get("name"): return models[0]["name"]
+         except Exception:
+diff --git a/core/jobs.py b/core/jobs.py
+index fa43356..c5794bb 100644
+--- a/core/jobs.py
++++ b/core/jobs.py
+@@ -12,7 +12,7 @@ class Job:
+  result:dict=field(default_factory=dict)
+  error:str|None=None
+  cancel_requested:bool=False
+- timeout_seconds:int=3600
++ timeout_seconds:float=3600
+  attempts:list=field(default_factory=list)
+ 
+ class JobManager:
+@@ -29,7 +29,7 @@ class JobManager:
+    try:c.execute("ALTER TABLE jobs ADD COLUMN attempts TEXT DEFAULT '[]'")
+    except sqlite3.OperationalError:pass
+  def submit(self,session_id,fn,timeout_seconds=3600):
+-  j=Job(session_id=session_id,timeout_seconds=max(1,int(timeout_seconds)))
++  j=Job(session_id=session_id,timeout_seconds=max(0.01,float(timeout_seconds)))
+   with self._db() as c:c.execute("INSERT INTO jobs(id,session_id,status,created,started,finished,result,error,cancel,attempts) VALUES(?,?,?,?,?,?,?,?,?,?)",(j.id,j.session_id,j.status,j.created_at,None,None,"",None,0,"[]"))
+   with self.cv:self.jobs[j.id]=j;self.q.append((j.id,fn));self.cv.notify()
+   self.emit("job.created","Job queued",job_id=j.id);return j
+diff --git a/core/orchestrator.py b/core/orchestrator.py
+index 42ad395..ec89a01 100644
+--- a/core/orchestrator.py
++++ b/core/orchestrator.py
+@@ -85,10 +85,10 @@ class Orchestrator:
+                 executor=ToolExecutor(self.workspace)
+                 job=getattr(self,"job",None)
+                 executor.job=job
+-                executor.manager=getattr(self,"job_manager",None)
++                manager=getattr(self,"job_manager",None)
++                executor.manager=manager
+                 output=None
+                 errors=[]
+-                job=getattr(self,"job",None)
+                 tried=set()
+                 attempt_number=0
+                 while candidates:
+diff --git a/core/registry.py b/core/registry.py
+index 4420d54..1091e9b 100644
+--- a/core/registry.py
++++ b/core/registry.py
+@@ -1,8 +1,11 @@
+ from .types import ModelCandidate
+ 
+ class ModelRegistry:
+-    def __init__(self) -> None:
+-        self.models: list[ModelCandidate] = []
++    def __init__(self, models=None) -> None:
++        # Optional seeding with an iterable of candidates keeps the registry
++        # convenient to construct in tests and when composing custom pools,
++        # while ``ModelRegistry()`` and ``ModelRegistry.default()`` keep working.
++        self.models: list[ModelCandidate] = list(models) if models else []
+ 
+     def register(self, candidate: ModelCandidate) -> None:
+         self.models.append(candidate)
+diff --git a/core/router.py b/core/router.py
+index 76cc992..3969013 100644
+--- a/core/router.py
++++ b/core/router.py
+@@ -17,9 +17,16 @@ class ModelRouter:
+    for model,ok,fail,lat in c.execute("SELECT model,ok,fail,latency FROM model_stats"): self.stats[model]={"ok":ok,"fail":fail,"latency":lat}
+    for model,n,until,category,updated in c.execute("SELECT model,failures,cooldown_until,category,updated_at FROM provider_health"):
+     if until > time.time(): self.failures[model]=(n,until,category)
++ def _ensure_tables(self,c):
++  # Health/stats tables are (re)created lazily so the router stays correct even
++  # when ``self.db`` is repointed after construction (as tests do).
++  c.execute("CREATE TABLE IF NOT EXISTS model_stats(model TEXT PRIMARY KEY, ok INTEGER DEFAULT 0, fail INTEGER DEFAULT 0, latency REAL DEFAULT 0)")
++  c.execute("CREATE TABLE IF NOT EXISTS provider_health(model TEXT PRIMARY KEY, failures INTEGER DEFAULT 0, cooldown_until REAL DEFAULT 0, category TEXT DEFAULT '', updated_at REAL DEFAULT 0)")
+  def _persist(self,m):
+-  s=self.stats[m.model]
+-  with sqlite3.connect(self.db) as c: c.execute("INSERT INTO model_stats(model,ok,fail,latency) VALUES(?,?,?,?) ON CONFLICT(model) DO UPDATE SET ok=excluded.ok,fail=excluded.fail,latency=excluded.latency",(m.model,s["ok"],s["fail"],s["latency"]))
++  s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0})
++  with sqlite3.connect(self.db) as c:
++   self._ensure_tables(c)
++   c.execute("INSERT INTO model_stats(model,ok,fail,latency) VALUES(?,?,?,?) ON CONFLICT(model) DO UPDATE SET ok=excluded.ok,fail=excluded.fail,latency=excluded.latency",(m.model,s["ok"],s["fail"],s["latency"]))
+  def discover_openrouter(self, limit=100):
+   import json, urllib.request
+   key=os.getenv("OPENROUTER_API_KEY")
+@@ -64,7 +71,13 @@ class ModelRouter:
+     return bool(models) and (not wanted or any(x==wanted or x.startswith(wanted+":") for x in models))
+    except Exception:
+     return False
+-  return bool(os.getenv(keys.get(m.provider,""))) or (m.provider=="anthropic" and self._claude_cli_available())
++  if m.provider=="anthropic":
++   return bool(os.getenv("ANTHROPIC_API_KEY")) or self._claude_cli_available()
++  env=keys.get(m.provider)
++  if env:
++   return bool(os.getenv(env))
++  # Providers without a required API key (local/custom pools) are usable.
++  return True
+  def _claude_cli_available(self):
+   import shutil
+   return shutil.which("claude") is not None
+@@ -75,16 +88,19 @@ class ModelRouter:
+    free=[m for m in cs if m.free]
+    if free: cs=free
+   now=time.time()
+-  active=[]; expired=[]
+-  for m in cs:
+-   state=self.failures.get(m.model)
+-   if state and state[1] <= now:
+-    self.failures.pop(m.model,None); self.half_open.add(m.model)
+-   if self._available(m) and (max_cost is None or m.input_cost_per_million+m.output_cost_per_million<=max_cost):
+-    active.append(m)
++  # Recover any expired cooldown (circuit open -> half-open) before ranking,
++  # sweeping the whole failure map so persisted health rows are cleared too.
++  expired=[model for model,state in list(self.failures.items()) if state[1] <= now]
++  for model in expired:
++   self.failures.pop(model,None); self.half_open.add(model)
+   if expired:
+    with sqlite3.connect(self.db) as c:
++    self._ensure_tables(c)
+     for model in expired: c.execute("DELETE FROM provider_health WHERE model=?",(model,))
++  active=[]
++  for m in cs:
++   if self._available(m) and (max_cost is None or m.input_cost_per_million+m.output_cost_per_million<=max_cost):
++    active.append(m)
+   active=[m for m in active if m.model not in self.failures or m.model in self.half_open]
+   return sorted(active,key=lambda m:(0 if m.model in self.half_open else 1,self.score(m,role),self.failures.get(m.model,(0,0,""))[0]))
+  def choose(self,role,*,requires_tools=False,prefer_free=False,max_cost=None):
+@@ -151,7 +167,9 @@ class ModelRouter:
+   if category=="weekly_limit": cooldown=max(base,cooldown)
+   until=time.time()+cooldown
+   self.failures[m.model]=(n+1,until,category)
+-  with sqlite3.connect(self.db) as c: c.execute("INSERT INTO provider_health(model,failures,cooldown_until,category,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(model) DO UPDATE SET failures=excluded.failures,cooldown_until=excluded.cooldown_until,category=excluded.category,updated_at=excluded.updated_at",(m.model,n+1,until,category,time.time()))
++  with sqlite3.connect(self.db) as c:
++   self._ensure_tables(c)
++   c.execute("INSERT INTO provider_health(model,failures,cooldown_until,category,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(model) DO UPDATE SET failures=excluded.failures,cooldown_until=excluded.cooldown_until,category=excluded.category,updated_at=excluded.updated_at",(m.model,n+1,until,category,time.time()))
+   s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["fail"]+=1; self._persist(m)
+   return {"category":category,"cooldown_seconds":cooldown}
+  def report_latency(self,m,seconds,ok=True):
+@@ -160,7 +178,9 @@ class ModelRouter:
+   recovered=m.model in self.half_open
+   self.half_open.discard(m.model)
+   self.failures.pop(m.model,None); self._persist(m)
+-  with sqlite3.connect(self.db) as c: c.execute("DELETE FROM provider_health WHERE model=?",(m.model,))
++  with sqlite3.connect(self.db) as c:
++   self._ensure_tables(c)
++   c.execute("DELETE FROM provider_health WHERE model=?",(m.model,))
+   return {"ok":True}
+  def circuit_view(self):
+   now=time.time(); out={}
+@@ -279,14 +299,6 @@ class ModelRouter:
+   with sqlite3.connect(self.db) as c: c.execute("CREATE TABLE IF NOT EXISTS task_outcomes(id INTEGER PRIMARY KEY AUTOINCREMENT,model TEXT,role TEXT,success INTEGER,latency REAL,tool_calls INTEGER,repairs INTEGER,cost REAL,created_at REAL)")
+   with sqlite3.connect(self.db) as c: c.execute("INSERT INTO task_outcomes(model,role,success,latency,tool_calls,repairs,cost,created_at) VALUES(?,?,?,?,?,?,?,?)",(m.model,role,int(success),float(latency),int(tool_calls),int(repairs),float(cost),time.time()))
+   self.report_latency(m,latency,success)
+- def learning_view(self,role=None):
+-  with sqlite3.connect(self.db) as c:
+-   c.execute("CREATE TABLE IF NOT EXISTS task_outcomes(id INTEGER PRIMARY KEY AUTOINCREMENT,model TEXT,role TEXT,success INTEGER,latency REAL,tool_calls INTEGER,repairs INTEGER,cost REAL,created_at REAL)")
+-   q="SELECT model,role,COUNT(*),AVG(success),AVG(latency),AVG(tool_calls),AVG(repairs),AVG(cost) FROM task_outcomes"; args=()
+-   if role: q+=" WHERE role=?"; args=(role,)
+-   q+=" GROUP BY model,role"; rows=c.execute(q,args).fetchall()
+-  return [{"model":r[0],"role":r[1],"tasks":r[2],"success_rate":round(r[3],3),"latency":round(r[4],3),"tool_calls":round(r[5],2),"repairs":round(r[6],2),"cost":round(r[7],6)} for r in rows]
+-
+  def learning_view(self,role=None):
+   with sqlite3.connect(self.db) as c:
+    c.execute("CREATE TABLE IF NOT EXISTS task_outcomes(id INTEGER PRIMARY KEY AUTOINCREMENT,model TEXT,role TEXT,success INTEGER,latency REAL,tool_calls INTEGER,repairs INTEGER,cost REAL,created_at REAL)")
+diff --git a/core/session.py b/core/session.py
+index 91e0559..f5a2d52 100644
+--- a/core/session.py
++++ b/core/session.py
+@@ -6,7 +6,7 @@ class Session:
+  def emit(self,kind,message,**data): self.events.append({"ts":time.time(),"kind":kind,"message":message,**data})
+ class SessionStore:
+  def __init__(self,db_path=None):
+-  self.db_path=db_path or os.getenv("ANS_DB","./data/ans.db"); os.makedirs(os.path.dirname(os.path.abspath(self.db_path)),exist_ok=True); self._init()
++  self.db_path=db_path or os.getenv("ANS_DB","./data/ans.db"); self.sessions={}; os.makedirs(os.path.dirname(os.path.abspath(self.db_path)),exist_ok=True); self._init()
+  def _db(self):
+   c=sqlite3.connect(self.db_path); c.row_factory=sqlite3.Row; return c
+  def _init(self):
+@@ -17,8 +17,10 @@ class SessionStore:
+  def create(self,task,mode):
+   s=Session(task=task,mode=mode)
+   with self._db() as c:c.execute("INSERT INTO sessions VALUES(?,?,?,?)",(s.id,s.task,s.mode,s.created_at))
++  self.sessions[s.id]=s
+   return s
+  def get(self,sid):
++  if sid in self.sessions: return self.sessions[sid]
+   with self._db() as c:
+    r=c.execute("SELECT * FROM sessions WHERE id=?",(sid,)).fetchone()
+    if not r:return None
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000..5f892e4
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,16 @@
++"""Test isolation.
++
++Runtime state (router health/stats, sessions, jobs) is persisted in SQLite.
++Without isolation, tests share ``data/*.db`` and leak provider cooldowns and
++stats across runs, making routing tests order- and history-dependent. This
++autouse fixture points every DB path at a per-test temp directory so each test
++starts from a clean, deterministic state.
++"""
++import pytest
++
++
++@pytest.fixture(autouse=True)
++def _isolate_runtime_state(tmp_path, monkeypatch):
++    monkeypatch.setenv("ANS_ROUTER_DB", str(tmp_path / "router_stats.db"))
++    monkeypatch.setenv("ANS_DB", str(tmp_path / "ans.db"))
++    yield
+diff --git a/tests/test_adaptive_fallback.py b/tests/test_adaptive_fallback.py
+index 4419462..a8a091f 100644
+--- a/tests/test_adaptive_fallback.py
++++ b/tests/test_adaptive_fallback.py
+@@ -8,6 +8,7 @@ def test_weekly_limit_fallback_avoids_anthropic():
+   a=ModelCandidate("anthropic","a",{"planner"},priority=1)
+   o=ModelCandidate("ollama","o",{"planner"},priority=2)
+   rt=ModelRouter(ModelRegistry([a,o])); rt.db=d+"/r.db"
++  rt._available=lambda m: True
+   xs=rt.fallback_policy("weekly_limit","planner","balanced")
+   assert all(x.provider!="anthropic" for x in xs)
+ 
+@@ -16,6 +17,7 @@ def test_timeout_fallback_prefers_non_anthropic():
+   a=ModelCandidate("anthropic","a",{"planner"},priority=1)
+   o=ModelCandidate("ollama","o",{"planner"},priority=2)
+   rt=ModelRouter(ModelRegistry([a,o])); rt.db=d+"/r.db"
++  rt._available=lambda m: True
+   assert rt.fallback_policy("timeout","planner")[0].provider!="anthropic"
+ 
+ 
+@@ -37,6 +39,7 @@ def test_failure_path_selects_fallback_after_opening_circuit():
+   a=ModelCandidate("anthropic","a",{"planner"},priority=1)
+   o=ModelCandidate("ollama","o",{"planner"},priority=2)
+   rt=ModelRouter(ModelRegistry([a,o])); rt.db=d+"/r.db"
++  rt._available=lambda m: True
+   rt.report_failure(a,error="weekly limit")
+   assert rt.circuit_view()["a"]["state"]=="open"
+   xs=rt.fallback_policy("weekly_limit","planner",exclude={"a"})
+@@ -69,9 +72,10 @@ def test_executor_failure_uses_fallback_and_records_attempts():
+   def complete(self,*args,**kwargs):
+    if self.name=="a": raise RuntimeError("weekly limit")
+    return type("R",(),{"text":"PASS"})()
+- a=ModelCandidate("anthropic","a",{"executor"},priority=1)
+- o=ModelCandidate("ollama","o",{"executor"},priority=2)
++ a=ModelCandidate("anthropic","a",{"planner","executor","reviewer","fixer"},priority=1)
++ o=ModelCandidate("ollama","o",{"planner","executor","reviewer","fixer"},priority=2)
+  rt=ModelRouter(ModelRegistry([a,o]))
++ rt._available=lambda m: True
+  orch=Orchestrator(router=rt)
+  orch.adapters={"a":A("a"),"o":A("o")}
+  orch.workspace="."
+diff --git a/tests/test_executor_fallback.py b/tests/test_executor_fallback.py
+index 7563ed3..a9ad4e3 100644
+--- a/tests/test_executor_fallback.py
++++ b/tests/test_executor_fallback.py
+@@ -1,4 +1,5 @@
+ from core.orchestrator import Orchestrator
++from core.router import ModelRouter
+ from core.types import ModelCandidate
+ 
+ 
+@@ -21,15 +22,17 @@ def test_executor_provider_fallback(monkeypatch, tmp_path):
+             self.adapter = adapter
+         def run(self, *args, **kwargs):
+             return self.adapter.complete("").text
+-    class FakeRouter:
++    class FakeRouter(ModelRouter):
++        # Uses the real router interface (policy_rank/score/cost_estimate/reporting)
++        # while pinning the candidate list so the executor fallback path from a
++        # weekly-limited primary to the backup provider is exercised directly.
+         def rank(self, role, requires_tools=False, **kwargs):
+             return [
+                 ModelCandidate("anthropic", "claude-code", {"executor"}, tool_capable=True, priority=1),
+                 ModelCandidate("openrouter", "backup", {"executor"}, tool_capable=True, priority=2),
+             ]
+-        def report_failure(self, m): pass
+-        def report_success(self, m): pass
+     orch.router = FakeRouter()
++    orch.router.db = str(tmp_path / "router.db")
+     orch.adapters = {
+         "claude-code": FakeAdapter(error="weekly limit"),
+         "openrouter": FakeAdapter(text="backup executed"),
+diff --git a/tests/test_ollama_integration.py b/tests/test_ollama_integration.py
+new file mode 100644
+index 0000000..08a8bf7
+--- /dev/null
++++ b/tests/test_ollama_integration.py
+@@ -0,0 +1,187 @@
++"""Focused coverage for the Ollama fallback path and environment loading.
++
++These are hermetic unit tests: HTTP is exercised through monkeypatched
++urllib entry points (no live server), while the real end-to-end check against
++a running Ollama is performed separately during deployment.
++"""
++import json
++import urllib.request
++
++import pytest
++
++from core.adapters import OllamaAdapter, ProviderError
++from core.config import load_dotenv
++from core.registry import ModelRegistry
++from core.router import ModelRouter
++from core.types import ModelCandidate
++
++
++class _Resp:
++    def __init__(self, payload):
++        self._b = json.dumps(payload).encode()
++
++    def read(self):
++        return self._b
++
++    def __enter__(self):
++        return self
++
++    def __exit__(self, *a):
++        return False
++
++
++# --- .env loading -----------------------------------------------------------
++def test_dotenv_loads_ollama_config(tmp_path, monkeypatch):
++    env = tmp_path / ".env"
++    env.write_text(
++        "OLLAMA_BASE_URL=http://127.0.0.1:11434\nOLLAMA_MODEL=llama3.2\n"
++    )
++    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
++    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
++    load_dotenv(str(env))
++    import os
++
++    assert os.getenv("OLLAMA_BASE_URL") == "http://127.0.0.1:11434"
++    assert os.getenv("OLLAMA_MODEL") == "llama3.2"
++
++
++def test_dotenv_does_not_override_existing(tmp_path, monkeypatch):
++    env = tmp_path / ".env"
++    env.write_text("OLLAMA_MODEL=from-file\n")
++    monkeypatch.setenv("OLLAMA_MODEL", "already-set")
++    load_dotenv(str(env))
++    import os
++
++    assert os.getenv("OLLAMA_MODEL") == "already-set"
++
++
++# --- availability / model discovery ----------------------------------------
++def _patch_tags(monkeypatch, models=None, error=None):
++    def fake_urlopen(req, timeout=0):
++        if error:
++            raise error
++        return _Resp({"models": [{"name": n} for n in (models or [])]})
++
++    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
++
++
++def test_ollama_available_when_model_present(monkeypatch):
++    monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
++    _patch_tags(monkeypatch, ["llama3.2:latest"])
++    r = ModelRouter()
++    m = next(x for x in r.registry.models if x.provider == "ollama")
++    assert r._available(m) is True
++
++
++def test_ollama_model_tag_prefix_match(monkeypatch):
++    # OLLAMA_MODEL=llama3.2 must match the concrete "llama3.2:latest" tag.
++    monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
++    _patch_tags(monkeypatch, ["qwen3:8b", "llama3.2:latest"])
++    r = ModelRouter()
++    m = next(x for x in r.registry.models if x.provider == "ollama")
++    assert r._available(m) is True
++
++
++def test_ollama_available_any_model_when_unset(monkeypatch):
++    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
++    _patch_tags(monkeypatch, ["whatever:latest"])
++    r = ModelRouter()
++    m = next(x for x in r.registry.models if x.provider == "ollama")
++    assert r._available(m) is True
++
++
++def test_ollama_unavailable_when_model_missing(monkeypatch):
++    monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
++    _patch_tags(monkeypatch, ["qwen3:8b"])  # requested model not present
++    r = ModelRouter()
++    m = next(x for x in r.registry.models if x.provider == "ollama")
++    assert r._available(m) is False
++
++
++def test_ollama_unavailable_on_connection_refused(monkeypatch):
++    _patch_tags(monkeypatch, error=ConnectionResetError("refused"))
++    r = ModelRouter()
++    m = next(x for x in r.registry.models if x.provider == "ollama")
++    assert r._available(m) is False
++
++
++def test_ollama_unavailable_on_empty_model_list(monkeypatch):
++    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
++    _patch_tags(monkeypatch, [])
++    r = ModelRouter()
++    m = next(x for x in r.registry.models if x.provider == "ollama")
++    assert r._available(m) is False
++
++
++# --- completion -------------------------------------------------------------
++def test_ollama_completion_posts_chat(monkeypatch):
++    adapter = OllamaAdapter("http://ollama.test", "llama3.2")
++    captured = {}
++
++    def fake_open(req, timeout=0):
++        captured["url"] = req.full_url
++        captured["payload"] = json.loads(req.data.decode())
++        return _Resp({"message": {"content": "hello"}})
++
++    monkeypatch.setattr(adapter.opener, "open", fake_open)
++    out = adapter.complete("hi")
++    assert out.text == "hello"
++    assert captured["url"] == "http://ollama.test/api/chat"
++    assert captured["payload"]["model"] == "llama3.2"
++    assert captured["payload"]["stream"] is False
++    assert captured["payload"]["messages"] == [{"role": "user", "content": "hi"}]
++
++
++def test_ollama_completion_malformed_response_raises(monkeypatch):
++    adapter = OllamaAdapter("http://ollama.test", "llama3.2")
++    monkeypatch.setattr(adapter.opener, "open", lambda req, timeout=0: _Resp({"unexpected": 1}))
++    with pytest.raises(ProviderError):
++        adapter.complete("hi")
++
++
++def test_ollama_completion_timeout_raises(monkeypatch):
++    adapter = OllamaAdapter("http://ollama.test", "llama3.2")
++
++    def boom(req, timeout=0):
++        raise TimeoutError("timed out")
++
++    monkeypatch.setattr(adapter.opener, "open", boom)
++    with pytest.raises(ProviderError):
++        adapter.complete("hi")
++
++
++def test_ollama_uses_proxy_free_opener_when_not_patched(monkeypatch):
++    # In production urllib.request.urlopen is not patched, so _open must route
++    # through the proxy-free opener (never through HTTP(S)_PROXY).
++    monkeypatch.setenv("HTTP_PROXY", "http://should-not-be-used:3128")
++    monkeypatch.setenv("HTTPS_PROXY", "http://should-not-be-used:3128")
++    adapter = OllamaAdapter("http://127.0.0.1:11434", "llama3.2")
++    used = {}
++
++    def spy(req, timeout=0):
++        used["opener"] = True
++        return _Resp({"message": {"content": "ok"}})
++
++    monkeypatch.setattr(adapter.opener, "open", spy)
++    assert adapter.complete("hi").text == "ok"
++    assert used.get("opener") is True
++
++
++# --- router fallback + circuit breaker -------------------------------------
++def test_router_selects_ollama_on_claude_weekly_limit():
++    a = ModelCandidate("anthropic", "claude-code", {"executor"}, tool_capable=True, priority=1)
++    o = ModelCandidate("ollama", "local", {"executor"}, free=True, tool_capable=True, priority=80)
++    rt = ModelRouter(ModelRegistry([a, o]))
++    rt._available = lambda m: True
++    # Claude Code hits its weekly limit -> circuit opens -> ollama is chosen.
++    rt.report_failure(a, error="You've hit your weekly limit")
++    assert rt.circuit_view()["claude-code"]["state"] == "open"
++    ranked = rt.fallback_policy("weekly_limit", "executor", exclude={"claude-code"})
++    assert ranked and ranked[0].provider == "ollama"
++
++
++def test_ollama_is_tool_capable_and_covers_agent_roles():
++    m = next(x for x in ModelRegistry.default().models if x.provider == "ollama")
++    assert m.tool_capable and m.free
++    assert {"planner", "executor", "reviewer", "fixer", "tester",
++            "architect", "researcher", "judge"} <= m.roles
+diff --git a/tests/test_router.py b/tests/test_router.py
+index 2a64820..020262d 100644
+--- a/tests/test_router.py
++++ b/tests/test_router.py
+@@ -4,8 +4,10 @@ def test_executor():
+     m=ModelRouter().choose("executor",requires_tools=True)
+     assert m.provider == "anthropic"
+ 
+-def test_free():
+-    assert ModelRouter().choose("researcher",prefer_free=True).free
++def test_free(monkeypatch):
++    r=ModelRouter()
++    monkeypatch.setattr(r,"_available",lambda m: True)
++    assert r.choose("researcher",prefer_free=True).free
+ 
+ 
+ def test_claude_fallback_for_planner(monkeypatch):
+-- 
+2.43.0
+

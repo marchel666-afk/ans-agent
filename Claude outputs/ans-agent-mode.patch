@@ -1,0 +1,612 @@
+From e7e8b55c42c6592ce5adedbdbb0484c9f0722d16 Mon Sep 17 00:00:00 2001
+From: MaR4eJl <marchel666@gmail.com>
+Date: Sun, 13 Sep 2026 07:58:27 +0000
+Subject: [PATCH] feat: conversational agent mode; stronger agent engine; drop
+ Arena
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Focus shifted to a real autonomous agent (arena.ai Agent Mode style), keeping
+the role/model routing ("distribution"). Model comparison (Arena) removed.
+
+Agent engine (core):
+- ToolLoop now accumulates the full step history so the agent reasons over its
+  whole progress (was: only the last tool result — broke multi-step tasks).
+- Explicit finish tool + robust JSON extraction (tolerates prose around JSON).
+- New cross-platform `search` tool (grep) in Workspace/executor.
+- Fix: SessionStore.emit serializes non-string messages (task.graph snapshot
+  was a list -> "type 'list' is not supported" crashed every real agent run).
+- Fix: ProjectMemory.remember_result moved to the base class (orchestrator uses
+  the base ProjectMemory; AttributeError crashed runs at completion).
+
+Frontend:
+- Conversational Agent view (default): task -> streamed steps (plan, per-role
+  model, tool calls + results, review, step ✓) -> final summary with details.
+  Live via WebSocket; approval gate surfaced inline.
+- Tabs: Agent / Chat / Workspace / Models / Sessions. Arena tab removed.
+
+Tests: tests/test_agent_loop.py (history/finish/parse/search),
+tests/test_session_store.py (non-str event + remember_result). 78 passed / 0 failed.
+Verified end-to-end via a headless (Playwright) run against a local Ollama-shaped
+server: planner -> executor(search) -> reviewer(PASS) x2 -> completed.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014JLsTFGmA8Mim6xfbGE3C7
+---
+ core/memory.py              |   6 +--
+ core/session.py             |   3 +-
+ core/tool_executor.py       |   1 +
+ core/tool_loop.py           | 104 ++++++++++++++++++++++++++++--------
+ core/tools.py               |  12 +++++
+ tests/test_agent_loop.py    |  69 ++++++++++++++++++++++++
+ tests/test_session_store.py |  24 +++++++++
+ web/app.js                  | Bin 16353 -> 15721 bytes
+ web/index.html              | 100 ++++++++++++++++------------------
+ web/style.css               |  14 +++++
+ 10 files changed, 251 insertions(+), 82 deletions(-)
+ create mode 100644 tests/test_agent_loop.py
+ create mode 100644 tests/test_session_store.py
+
+diff --git a/core/memory.py b/core/memory.py
+index 215d2ed..4046139 100644
+--- a/core/memory.py
++++ b/core/memory.py
+@@ -10,6 +10,9 @@ class ProjectMemory:
+         return "\n".join(f"- {k}: {v}" for k,v in m.items())
+     def remember(self,key,value):
+         self.store.save_memory(self.project,key,value)
++    def remember_result(self,task,result):
++        key="task:"+hashlib.sha256(task.encode("utf-8")).hexdigest()[:16]
++        self.remember(key,str(result)[:8000])
+ 
+ class AgentMemory(ProjectMemory):
+     def search_relevant(self,task,limit=10):
+@@ -19,6 +22,3 @@ class AgentMemory(ProjectMemory):
+         self.remember(key,value)
+     def prompt_context(self,task,limit=8):
+         return self.get_context()
+-    def remember_result(self,task,result):
+-        key="task:"+hashlib.sha256(task.encode("utf-8")).hexdigest()[:16]
+-        self.remember(key,result[:8000])
+diff --git a/core/session.py b/core/session.py
+index f5a2d52..784efbb 100644
+--- a/core/session.py
++++ b/core/session.py
+@@ -29,7 +29,8 @@ class SessionStore:
+     s.events.append({"ts":e["ts"],"kind":e["kind"],"message":e["message"],**json.loads(e["data"] or "{}")})
+    return s
+  def emit(self,sid,kind,message,**data):
+-  with self._db() as c:c.execute("INSERT INTO events(session_id,ts,kind,message,data) VALUES(?,?,?,?,?)",(sid,time.time(),kind,message,json.dumps(data,ensure_ascii=False)))
++  if not isinstance(message,str): message=json.dumps(message,ensure_ascii=False,default=str)
++  with self._db() as c:c.execute("INSERT INTO events(session_id,ts,kind,message,data) VALUES(?,?,?,?,?)",(sid,time.time(),kind,message,json.dumps(data,ensure_ascii=False,default=str)))
+  def save_memory(self,project,key,value):
+   with self._db() as c:c.execute("INSERT INTO memories(project,key,value,updated_at) VALUES(?,?,?,?) ON CONFLICT(project,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(project,key,value,time.time()))
+  def memories(self,project):
+diff --git a/core/tool_executor.py b/core/tool_executor.py
+index 1cd6afe..38fdd20 100644
+--- a/core/tool_executor.py
++++ b/core/tool_executor.py
+@@ -6,6 +6,7 @@ class ToolExecutor:
+         if name=="read_file": return {"ok":True,"content":self.ws.read(args["path"])}
+         if name=="write_file": return {"ok":True,"path":self.ws.write(args["path"],args["content"])}
+         if name=="list_files": return {"ok":True,"files":self.ws.list(args.get("path","."))}
++        if name=="search": return {"ok":True,"hits":self.ws.search(args["query"],args.get("path","."))}
+         if name=="terminal": return {"ok":True,**self.ws.run(args["command"],min(int(args.get("timeout",120)),300))}
+         if name=="git_status": return {"ok":True,**self.ws.git("status --short")}
+         if name=="git_diff": return {"ok":True,**self.ws.git("diff --no-ext-diff")}
+diff --git a/core/tool_loop.py b/core/tool_loop.py
+index d9c5885..c641cc2 100644
+--- a/core/tool_loop.py
++++ b/core/tool_loop.py
+@@ -1,24 +1,82 @@
+-import json
+-TOOLS='Available tools:\n- read_file {path}\n- write_file {path,content}\n- list_files {path?}\n- terminal {command,timeout?}\n- git_status {}\n- git_diff {}\nWhen a tool is needed, output exactly one JSON line.'
++import json, re
++
++TOOLS = (
++    "You are an autonomous agent working inside a sandboxed project workspace.\n"
++    "Available tools (call ONE per step by outputting a single JSON line):\n"
++    "- read_file {path}\n"
++    "- write_file {path, content}\n"
++    "- list_files {path?}\n"
++    "- search {query, path?}\n"
++    "- terminal {command, timeout?}\n"
++    "- git_status {}\n- git_diff {}\n- git_log {}\n"
++    "- finish {summary}   # call when the step is complete; summary is the result\n"
++    "Rules: think briefly, then output exactly one JSON line like "
++    '{\"tool\":\"read_file\",\"args\":{\"path\":\"app.py\"}}. '
++    "Use the tool results in PROGRESS to decide the next action. "
++    "When the task is done, call finish with a concise summary of what you did."
++)
++
++
++def _extract_json(text):
++    """Pull the first parseable JSON object out of a model response."""
++    for line in text.splitlines():
++        line = line.strip().strip("`").strip()
++        if line.startswith("{") and line.endswith("}"):
++            try:
++                return json.loads(line)
++            except Exception:
++                pass
++    m = re.search(r"\{.*\}", text, re.S)
++    if m:
++        try:
++            return json.loads(m.group(0))
++        except Exception:
++            pass
++    return None
++
++
+ class ToolLoop:
+- def __init__(self,adapter,executor,emit=None,approval=None,session_id=None): self.adapter=adapter; self.executor=executor; self.emit=emit or (lambda *a,**k:None); self.approval=approval; self.session_id=session_id
+- def run(self,prompt,max_steps=20):
+-  current=prompt+"\n\n"+TOOLS
+-  for i in range(max_steps):
+-   if getattr(getattr(self.executor,"job",None),"cancel_requested",False): return "CANCELLED_BY_USER"
+-   answer=self.adapter.complete(current,cwd=str(self.executor.ws.root)).text.strip()
+-   try: obj=json.loads(next(x for x in answer.splitlines() if x.strip().startswith("{") and x.strip().endswith("}")))
+-   except Exception:return answer
+-   if "tool" not in obj:return answer
+-   name,args=obj["tool"],obj.get("args",{})
+-   if self.approval and not self.approval.request(self.session_id,name,args):
+-    self.emit("approval.waiting",f"Waiting for approval: {name}",tool=name,args=args)
+-    if hasattr(self.executor,"job") and self.executor.job: self.executor.manager.set_waiting(self.executor.job)
+-    if not self.approval.wait_for(self.session_id,name,args): return "APPROVAL_DENIED_OR_TIMEOUT: "+name
+-    if hasattr(self.executor,"job") and self.executor.job: self.executor.manager.set_running(self.executor.job)
+-   self.emit("tool.call",name,args=args)
+-   try: result=self.executor.execute(name,args)
+-   except Exception as e: result={"ok":False,"error":str(e)}
+-   self.emit("tool.result",name,result=result)
+-   current=prompt+"\n\n"+TOOLS+"\n\nTOOL RESULT:\n"+json.dumps(result,ensure_ascii=False)[:20000]
+-  return "Tool loop stopped at maximum steps."
++    def __init__(self, adapter, executor, emit=None, approval=None, session_id=None):
++        self.adapter = adapter
++        self.executor = executor
++        self.emit = emit or (lambda *a, **k: None)
++        self.approval = approval
++        self.session_id = session_id
++
++    def run(self, prompt, max_steps=20):
++        system = prompt + "\n\n" + TOOLS
++        transcript = []  # accumulated step history so the agent remembers its work
++        for i in range(max_steps):
++            if getattr(getattr(self.executor, "job", None), "cancel_requested", False):
++                return "CANCELLED_BY_USER"
++            convo = system
++            if transcript:
++                convo += "\n\nPROGRESS SO FAR:\n" + "\n".join(transcript[-40:])
++            convo += "\n\nNext action (one JSON line), or finish when done:"
++            answer = self.adapter.complete(convo, cwd=str(self.executor.ws.root)).text.strip()
++            obj = _extract_json(answer)
++            if not obj or "tool" not in obj:
++                # No tool call -> treat the plain answer as the final result.
++                return answer
++            name, args = obj["tool"], obj.get("args", {}) or {}
++            if name in ("finish", "done", "final"):
++                return args.get("summary") or args.get("result") or args.get("text") or "Task step completed."
++            if self.approval and not self.approval.request(self.session_id, name, args):
++                self.emit("approval.waiting", f"Waiting for approval: {name}", tool=name, args=args)
++                if getattr(self.executor, "job", None) and self.executor.manager:
++                    self.executor.manager.set_waiting(self.executor.job)
++                if not self.approval.wait_for(self.session_id, name, args):
++                    return "APPROVAL_DENIED_OR_TIMEOUT: " + name
++                if getattr(self.executor, "job", None) and self.executor.manager:
++                    self.executor.manager.set_running(self.executor.job)
++            self.emit("tool.call", name, args=args)
++            try:
++                result = self.executor.execute(name, args)
++            except Exception as e:
++                result = {"ok": False, "error": str(e)}
++            self.emit("tool.result", name, result=result)
++            transcript.append(
++                f"STEP {i+1}: {name}({json.dumps(args, ensure_ascii=False)[:400]}) -> "
++                + json.dumps(result, ensure_ascii=False)[:1500]
++            )
++        return "Reached maximum steps. Progress:\n" + "\n".join(transcript[-6:])
+diff --git a/core/tools.py b/core/tools.py
+index 23ca5ab..4c5f630 100644
+--- a/core/tools.py
++++ b/core/tools.py
+@@ -13,6 +13,18 @@ class Workspace:
+         p=self._path(path); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(content,encoding="utf-8"); return str(p.relative_to(self.root))
+     def list(self,path="."):
+         return [str(p.relative_to(self.root)) for p in self._path(path).rglob("*") if p.is_file()][:500]
++    def search(self,query,path=".",max_hits=100):
++        base=self._path(path); hits=[]
++        files=[base] if base.is_file() else base.rglob("*")
++        for p in files:
++            if not p.is_file(): continue
++            try: text=p.read_text(encoding="utf-8")
++            except Exception: continue
++            for n,line in enumerate(text.splitlines(),1):
++                if query in line:
++                    hits.append({"file":str(p.relative_to(self.root)),"line":n,"text":line.strip()[:200]})
++                    if len(hits)>=max_hits: return hits
++        return hits
+     def run(self,command,timeout=120):
+         p=subprocess.run(command,cwd=self.root,shell=True,text=True,capture_output=True,timeout=timeout)
+         return {"returncode":p.returncode,"stdout":p.stdout[-12000:],"stderr":p.stderr[-12000:]}
+diff --git a/tests/test_agent_loop.py b/tests/test_agent_loop.py
+new file mode 100644
+index 0000000..b964a95
+--- /dev/null
++++ b/tests/test_agent_loop.py
+@@ -0,0 +1,69 @@
++"""Agent tool loop: history accumulation, finish, robust parsing, search tool."""
++from core.tool_loop import ToolLoop, _extract_json
++from core.tool_executor import ToolExecutor
++
++
++class ScriptAdapter:
++    def __init__(self, script):
++        self.script = script
++        self.calls = 0
++        self.prompts = []
++
++    def complete(self, prompt, **k):
++        self.prompts.append(prompt)
++        r = self.script[min(self.calls, len(self.script) - 1)]
++        self.calls += 1
++        return type("R", (), {"text": r})()
++
++
++def test_loop_accumulates_history_and_finishes(tmp_path):
++    (tmp_path / "note.txt").write_text("hello world", encoding="utf-8")
++    ex = ToolExecutor(str(tmp_path))
++    adapter = ScriptAdapter([
++        '{"tool":"list_files","args":{}}',
++        '{"tool":"search","args":{"query":"hello"}}',
++        '{"tool":"finish","args":{"summary":"done: found hello"}}',
++    ])
++    events = []
++    loop = ToolLoop(adapter, ex, emit=lambda k, m=None, **d: events.append(k))
++    out = loop.run("find hello", max_steps=10)
++    assert out == "done: found hello"
++    assert adapter.calls == 3
++    # third prompt must carry the accumulated progress of the first two steps
++    assert "PROGRESS SO FAR" in adapter.prompts[2]
++    assert "list_files" in adapter.prompts[2] and "search" in adapter.prompts[2]
++    assert "tool.call" in events and "tool.result" in events
++
++
++def test_loop_returns_plain_answer_when_no_tool(tmp_path):
++    ex = ToolExecutor(str(tmp_path))
++    out = ToolLoop(ScriptAdapter(["Just a plain answer, no tools needed."]), ex).run("hi")
++    assert out == "Just a plain answer, no tools needed."
++
++
++def test_loop_parses_json_after_prose(tmp_path):
++    ex = ToolExecutor(str(tmp_path))
++    out = ToolLoop(ScriptAdapter(['Sure, done.\n{"tool":"finish","args":{"summary":"ok"}}']), ex).run("hi")
++    assert out == "ok"
++
++
++def test_loop_stops_at_max_steps(tmp_path):
++    ex = ToolExecutor(str(tmp_path))
++    # always asks to list files, never finishes
++    out = ToolLoop(ScriptAdapter(['{"tool":"list_files","args":{}}']), ex).run("loop", max_steps=3)
++    assert "maximum steps" in out.lower()
++
++
++def test_extract_json_variants():
++    assert _extract_json('{"tool":"x"}')["tool"] == "x"
++    assert _extract_json('blah\n{"tool":"y","args":{}}\nmore')["tool"] == "y"
++    assert _extract_json("no json here") is None
++
++
++def test_search_tool(tmp_path):
++    (tmp_path / "a.py").write_text("alpha\nneedle here\n", encoding="utf-8")
++    (tmp_path / "b.txt").write_text("nothing", encoding="utf-8")
++    ex = ToolExecutor(str(tmp_path))
++    res = ex.execute("search", {"query": "needle"})
++    assert res["ok"] and len(res["hits"]) == 1
++    assert res["hits"][0]["file"] == "a.py" and res["hits"][0]["line"] == 2
+diff --git a/tests/test_session_store.py b/tests/test_session_store.py
+new file mode 100644
+index 0000000..c0cbd39
+--- /dev/null
++++ b/tests/test_session_store.py
+@@ -0,0 +1,24 @@
++"""SessionStore persistence must tolerate non-string event messages
++(e.g. the task.graph snapshot emitted during an agent run)."""
++from core.session import SessionStore
++
++
++def test_emit_non_string_message_persists(tmp_path):
++    db = str(tmp_path / "s.db")
++    st = SessionStore(db)
++    s = st.create("task", "agent")
++    # A list message (as orchestrator emits for task.graph) must not crash SQLite.
++    st.emit(s.id, "task.graph", [{"id": "n1", "title": "step", "status": "todo"}])
++    st.emit(s.id, "run.completed", "done")
++    st.sessions.clear()  # force reconstruction from the database
++    got = st.get(s.id)
++    kinds = [e["kind"] for e in got.events]
++    assert "task.graph" in kinds and "run.completed" in kinds
++
++
++def test_project_memory_remember_result(tmp_path):
++    from core.memory import ProjectMemory
++    st = SessionStore(str(tmp_path / "m.db"))
++    mem = ProjectMemory(st, "default")
++    mem.remember_result("do X", "the final result")
++    assert "the final result" in mem.get_context()
+diff --git a/web/app.js b/web/app.js
+index f537fdf98ca4203279a2316f3e6e8c0b21cd68bf..a053bbf28caa3dfefc6b72a55b394f93b732a8fe 100644
+GIT binary patch
+delta 4105
+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
+
+delta 3947
+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
+
+diff --git a/web/index.html b/web/index.html
+index a978276..d8f5adc 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -10,11 +10,11 @@
+ <aside class="sidebar">
+   <div class="brand">ANS <small>AGENT</small></div>
+   <div class="section">WORKSPACE</div>
+-  <button class="nav active" data-view="chat">◇ Chat</button>
+-  <button class="nav" data-view="agent">◈ Agent</button>
+-  <button class="nav" data-view="arena">⚔ Arena</button>
++  <button class="nav active" data-view="agent">◈ Agent</button>
++  <button class="nav" data-view="chat">◇ Chat</button>
++  <button class="nav" data-view="workspace">◫ Workspace</button>
+   <button class="nav" data-view="models">◉ Models</button>
+-  <button class="nav" data-view="sessions">◫ Sessions</button>
++  <button class="nav" data-view="sessions">☰ Sessions</button>
+   <div class="section">RECENT</div>
+   <div id="sessions" class="recent"></div>
+ </aside>
+@@ -23,7 +23,7 @@
+   <header>
+     <div>
+       <div class="eyebrow">WORKSPACE / ANS</div>
+-      <h1 id="viewTitle">Chat</h1>
++      <h1 id="viewTitle">Agent</h1>
+     </div>
+     <div class="head-actions">
+       <span id="health" class="status">● CONNECTING</span>
+@@ -31,14 +31,39 @@
+     </div>
+   </header>
+ 
+-  <!-- ===================== CHAT ===================== -->
+-  <section class="view" data-view="chat">
++  <!-- ===================== AGENT (conversational) ===================== -->
++  <section class="view" data-view="agent">
++    <div class="chat-wrap">
++      <div class="chat-bar">
++        <select id="agentMode" title="Режим"><option value="agent">Agent</option><option value="autopilot">Autopilot</option></select>
++        <select id="policy" title="Политика роутинга"><option value="balanced">Balanced</option><option value="cheap">Cheap</option><option value="quality">Quality</option></select>
++        <select id="profile" title="Профиль"><option value="developer">Developer</option><option value="game_developer">Game Dev</option><option value="researcher">Researcher</option><option value="budget">Budget</option></select>
++        <input id="budget" type="number" min="0" step="0.01" placeholder="$ budget">
++        <span id="runstatus" class="status">IDLE</span>
++        <button class="mini" onclick="cancelJob()">Stop</button>
++        <button class="mini" onclick="newAgent()">New</button>
++      </div>
++      <div id="agentThread" class="chat-thread"><div class="empty">Опиши задачу — агент спланирует, выполнит её инструментами (файлы, терминал, git, поиск) и покажет ход работы в реальном времени.</div></div>
++      <div class="chat-input">
++        <textarea id="agentInput" rows="1" placeholder="Что построить, починить, исследовать?  (Enter — запуск, Shift+Enter — перенос)"></textarea>
++        <button class="primary" id="agentSend" onclick="startAgent()">Run</button>
++      </div>
++    </div>
++    <div id="approval" class="approval hidden">
++      <div class="approval-title">ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ</div>
++      <div id="approvalText"></div>
++      <div class="approval-actions"><button onclick="decide(false)">Отклонить</button><button class="primary" onclick="decide(true)">Разрешить</button></div>
++    </div>
++  </section>
++
++  <!-- ===================== CHAT (direct model) ===================== -->
++  <section class="view" data-view="chat" hidden>
+     <div class="chat-wrap">
+       <div class="chat-bar">
+         <select id="chatModel"><option value="">Auto (router)</option></select>
+         <button class="mini" onclick="newChat()">New chat</button>
+       </div>
+-      <div id="chatThread" class="chat-thread"><div class="empty">Начни диалог — выбери модель или оставь Auto.</div></div>
++      <div id="chatThread" class="chat-thread"><div class="empty">Прямой чат с выбранной моделью (без инструментов).</div></div>
+       <div class="chat-input">
+         <textarea id="chatInput" rows="1" placeholder="Спроси что угодно…  (Enter — отправить, Shift+Enter — перенос)"></textarea>
+         <button class="primary" id="chatSend" onclick="sendChat()">Send</button>
+@@ -46,29 +71,23 @@
+     </div>
+   </section>
+ 
+-  <!-- ===================== AGENT ===================== -->
+-  <section class="view" data-view="agent" hidden>
+-    <div class="agent-controls">
+-      <select id="profile"><option value="developer">Developer</option><option value="game_developer">Game Developer</option><option value="researcher">Researcher</option><option value="budget">Budget</option></select>
+-      <select id="policy"><option value="balanced">Balanced</option><option value="cheap">Cheap</option><option value="quality">Quality</option></select>
+-      <input id="budget" type="number" min="0" step="0.01" placeholder="$ budget">
+-      <select id="mode"><option value="agent">Agent</option><option value="autopilot">Autopilot</option><option value="best_of_n">Best of N</option><option value="chat">Chat (single model)</option></select>
+-    </div>
++  <!-- ===================== WORKSPACE (inspect) ===================== -->
++  <section class="view" data-view="workspace" hidden>
+     <div class="layout">
+       <section class="center">
+-        <div class="card task">
+-          <div class="card-head"><span>TASK</span><span class="hint">Опиши результат</span></div>
+-          <textarea id="task" placeholder="Что ANS должен построить, починить, исследовать или улучшить?"></textarea>
+-          <div class="task-foot"><span>Ctrl + Enter — запустить</span><button class="primary" onclick="start()">Run Agent</button></div>
+-        </div>
+-        <div class="card run">
+-          <div class="card-head"><span>LIVE RUN</span><span id="runstatus" class="status">IDLE</span><button class="mini" onclick="cancelJob()">Stop</button></div>
+-          <div id="timeline" class="timeline"><div class="empty">Активность агента появится здесь.</div></div>
+-        </div>
+         <div class="card">
+           <div class="card-head"><span>DIFF</span><button class="mini" onclick="loadDiff()">Refresh</button></div>
+           <pre id="diff">No diff loaded.</pre>
+         </div>
++        <div class="card">
++          <div class="card-head"><span>GIT</span><button class="mini" onclick="loadGit()">Refresh</button></div>
++          <pre id="git">Loading…</pre>
++        </div>
++        <div class="card">
++          <div class="card-head"><span>ADAPTIVE LEARNING</span><button class="mini" onclick="loadLearning()">Refresh</button></div>
++          <div id="learning">No task history yet.</div>
++          <div id="circuitBreakers" class="circuit-breakers"><div class="hint">Circuit breakers</div></div>
++        </div>
+       </section>
+       <aside class="right">
+         <div class="card">
+@@ -79,43 +98,14 @@
+           <div class="card-head"><span id="filename">FILE</span></div>
+           <textarea id="filecontent" readonly>Select a file</textarea>
+         </div>
+-        <div class="card">
+-          <div class="card-head"><span>ADAPTIVE LEARNING</span><button class="mini" onclick="loadLearning()">Refresh</button></div>
+-          <div id="learning">No task history yet.</div>
+-        </div>
+-        <div class="card">
+-          <div class="card-head"><span>TASK GRAPH</span></div>
+-          <div id="taskGraph">Graph appears when an agent run starts.</div>
+-          <div id="circuitBreakers" class="circuit-breakers"><div class="hint">Circuit breakers</div></div>
+-        </div>
+-        <div class="card">
+-          <div class="card-head"><span>GIT</span><button class="mini" onclick="loadGit()">Refresh</button></div>
+-          <pre id="git">Loading…</pre>
+-        </div>
+       </aside>
+     </div>
+-    <div id="approval" class="approval hidden">
+-      <div class="approval-title">APPROVAL REQUIRED</div>
+-      <div id="approvalText"></div>
+-      <div class="approval-actions"><button onclick="decide(false)">Deny</button><button class="primary" onclick="decide(true)">Allow</button></div>
+-    </div>
+-  </section>
+-
+-  <!-- ===================== ARENA ===================== -->
+-  <section class="view" data-view="arena" hidden>
+-    <div class="card">
+-      <div class="card-head"><span>ARENA — сравнение моделей</span><span class="hint">Один промпт → несколько моделей</span></div>
+-      <div id="arenaPick" class="arena-pick"></div>
+-      <textarea id="arenaPrompt" placeholder="Промпт для сравнения…"></textarea>
+-      <div class="task-foot"><span>Отметь 2–4 модели</span><button class="primary" onclick="runArena()">Сравнить</button></div>
+-    </div>
+-    <div id="arenaGrid" class="arena-grid"></div>
+   </section>
+ 
+   <!-- ===================== MODELS ===================== -->
+   <section class="view" data-view="models" hidden>
+     <div class="card">
+-      <div class="card-head"><span>MODEL POOL</span><span><button class="mini" onclick="refreshModels()">Refresh</button> <button class="mini" onclick="discoverModels()">Discover OpenRouter</button></span></div>
++      <div class="card-head"><span>MODEL POOL — распределение по ролям</span><span><button class="mini" onclick="refreshModels()">Refresh</button> <button class="mini" onclick="discoverModels()">Discover OpenRouter</button></span></div>
+       <div id="models">Loading…</div>
+       <div id="modelManager" class="model-manager"></div>
+     </div>
+diff --git a/web/style.css b/web/style.css
+index 65edec7..0aacd83 100644
+--- a/web/style.css
++++ b/web/style.css
+@@ -46,3 +46,17 @@ main{display:block}
+ .approval.hidden{display:none}
+ .approval-title{font-size:10px;letter-spacing:.12em;color:#d8b366;margin-bottom:8px}
+ .approval-actions{display:flex;gap:10px;margin-top:10px}
++
++/* ---- conversational agent activity ---- */
++.chat-bar select,.chat-bar input{padding:7px 9px}
++.chat-bar input{width:90px;background:#14181d;color:#dfe3e7;border:1px solid #2a3037;border-radius:7px}
++.agent-activity{display:flex;flex-direction:column;gap:3px;font:12px ui-monospace,SFMono-Regular,monospace}
++.act{padding:3px 0;color:#aeb5be;border-bottom:1px solid #171b20;word-break:break-word}
++.act-plan{color:#cdb3ff}.act-model{color:#8fd0ff}.act-step{color:#e8eaed;font-weight:600}
++.act-tool{color:#f0c674}.act-toolres{color:#7f8994}.act-review{color:#b7c3cf}
++.act-ok{color:#75d78c}.act-warn{color:#e0b050}.act-err,.act-error{color:#e77b7b}.act-info{color:#8c96a2}
++.agent-final{margin-top:10px}
++.final-good{color:#75d78c;font-weight:650;margin-bottom:6px}
++.final-bad{color:#e77b7b;font-weight:650}
++.final-steps{color:#b7c3cf;font-size:13px;line-height:1.6}
++.final-obs{margin-top:8px}.final-obs summary{cursor:pointer;color:#8c96a2;font-size:11px}
+-- 
+2.43.0
+

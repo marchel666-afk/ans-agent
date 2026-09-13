@@ -35,6 +35,60 @@ class ClaudeCodeAdapter:
         # /chat streaming contract holds for every provider.
         yield self.complete(prompt,**kwargs).text
 
+class AnthropicAdapter:
+    """Native Anthropic Messages API adapter (https://api.anthropic.com/v1/messages).
+
+    Anthropic's API is *not* OpenAI-compatible (different endpoint, auth header and
+    response shape), so it gets its own adapter. Used only when ANTHROPIC_API_KEY is
+    set; local Claude Code (CLI) remains a separate provider for dev machines.
+    """
+    def __init__(self,model=None,api_key_env="ANTHROPIC_API_KEY"):
+        self.name="anthropic"
+        self.api_key_env=api_key_env
+        self.model=model or os.getenv("ANTHROPIC_MODEL","claude-sonnet-4-5")
+        self.base_url=os.getenv("ANTHROPIC_BASE_URL","https://api.anthropic.com/v1").rstrip("/")
+        self.version=os.getenv("ANTHROPIC_VERSION","2023-06-01")
+    def _resolve(self,requested):
+        aliases={"anthropic","claude","claude-code","default"}
+        return self.model if (not requested or requested in aliases) else requested
+    def _headers(self,key):
+        return {"x-api-key":key,"anthropic-version":self.version,"content-type":"application/json","User-Agent":"ANS-Agent/1.0"}
+    def complete(self,prompt,**kwargs):
+        key=os.getenv(self.api_key_env)
+        if not key: raise ProviderError(f"Missing {self.api_key_env}")
+        model=self._resolve(kwargs.get("model"))
+        payload=json.dumps({"model":model,"max_tokens":kwargs.get("max_tokens",4096),
+                            "messages":[{"role":"user","content":prompt}]}).encode()
+        req=urllib.request.Request(self.base_url+"/messages",data=payload,headers=self._headers(key))
+        try:
+            with urllib.request.urlopen(req,timeout=kwargs.get("timeout",120)) as r: data=json.load(r)
+        except Exception as e: raise ProviderError(f"anthropic: {e}") from e
+        try:
+            text="".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
+            return ProviderResponse(text,data)
+        except (KeyError,TypeError) as e: raise ProviderError("anthropic: malformed response") from e
+    def stream(self,prompt,**kwargs):
+        key=os.getenv(self.api_key_env)
+        if not key: raise ProviderError(f"Missing {self.api_key_env}")
+        model=self._resolve(kwargs.get("model"))
+        payload=json.dumps({"model":model,"max_tokens":kwargs.get("max_tokens",4096),
+                            "messages":[{"role":"user","content":prompt}],"stream":True}).encode()
+        req=urllib.request.Request(self.base_url+"/messages",data=payload,headers=self._headers(key))
+        try:
+            r=urllib.request.urlopen(req,timeout=kwargs.get("timeout",120))
+        except Exception as e: raise ProviderError(f"anthropic: {e}") from e
+        with r:
+            for raw in r:
+                line=(raw.decode("utf-8","ignore") if isinstance(raw,bytes) else str(raw)).strip()
+                if not line or not line.startswith("data:"): continue
+                data=line[5:].strip()
+                if not data or data=="[DONE]": continue
+                try: obj=json.loads(data)
+                except Exception: continue
+                if obj.get("type")=="content_block_delta":
+                    delta=(obj.get("delta") or {}).get("text")
+                    if delta: yield delta
+
 class OpenAICompatibleAdapter:
     def __init__(self,name,base_url,api_key_env,model=None):
         self.name=name; self.base_url=base_url.rstrip("/"); self.api_key_env=api_key_env; self.model=model
@@ -131,7 +185,12 @@ class OllamaAdapter:
 
 def build_adapters():
     out={"claude-code":ClaudeCodeAdapter(), "ollama":OllamaAdapter()}
+    # Native Anthropic API (Claude) — used when a key is present; falls back to the
+    # local Claude Code CLI on dev machines that have it.
+    if os.getenv("ANTHROPIC_API_KEY"): out["anthropic"]=AnthropicAdapter(os.getenv("ANTHROPIC_MODEL","claude-sonnet-4-5"))
     if os.getenv("OPENAI_API_KEY"): out["openai"]=OpenAICompatibleAdapter("openai","https://api.openai.com/v1","OPENAI_API_KEY",os.getenv("OPENAI_MODEL","gpt-5"))
     if os.getenv("GEMINI_API_KEY"): out["gemini"]=OpenAICompatibleAdapter("google","https://generativelanguage.googleapis.com/v1beta/openai","GEMINI_API_KEY",os.getenv("GEMINI_MODEL","gemini-2.5-flash"))
     if os.getenv("OPENROUTER_API_KEY"): out["openrouter"]=OpenAICompatibleAdapter("openrouter","https://openrouter.ai/api/v1","OPENROUTER_API_KEY",os.getenv("OPENROUTER_MODEL","openrouter/free"))
+    # Groq — free tier, extremely fast inference (OpenAI-compatible endpoint).
+    if os.getenv("GROQ_API_KEY"): out["groq"]=OpenAICompatibleAdapter("groq","https://api.groq.com/openai/v1","GROQ_API_KEY",os.getenv("GROQ_MODEL","llama-3.3-70b-versatile"))
     return out
