@@ -53,13 +53,15 @@ class OllamaAdapter:
     def __init__(self,base_url=None,model=None):
         self.base_url=(base_url or os.getenv("OLLAMA_BASE_URL","http://127.0.0.1:11434")).rstrip("/")
         self.model=model or os.getenv("OLLAMA_MODEL","")
+        # Ollama is local; do not route loopback traffic through HTTP proxies.
+        self.opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
     def _model(self, requested=None):
         if requested and requested not in {"local", "ollama"}:
             return requested
         if self.model:
             return self.model
         try:
-            with urllib.request.urlopen(self.base_url+"/api/tags",timeout=2) as r: data=json.load(r)
+            with self.opener.open(self.base_url+"/api/tags",timeout=2) as r: data=json.load(r)
             models=data.get("models") or []
             if models and models[0].get("name"): return models[0]["name"]
         except Exception:
@@ -70,7 +72,7 @@ class OllamaAdapter:
         payload=json.dumps({"model":model,"messages":[{"role":"user","content":prompt}],"stream":False}).encode()
         req=urllib.request.Request(self.base_url+"/api/chat",data=payload,headers={"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
         try:
-            with urllib.request.urlopen(req,timeout=kwargs.get("timeout",120)) as r: data=json.load(r)
+            with self.opener.open(req,timeout=kwargs.get("timeout",120)) as r: data=json.load(r)
         except Exception as e:
             raise ProviderError(f"{self.name}: {e}") from e
         try: return ProviderResponse(data["message"]["content"],data)
