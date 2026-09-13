@@ -5,6 +5,8 @@ class ToolExecutor:
         if self.manager and hasattr(self.manager,"record_tool"): self.manager.record_tool(name,args)
         if name=="read_file": return {"ok":True,"content":self.ws.read(args["path"])}
         if name=="write_file": return {"ok":True,"path":self.ws.write(args["path"],args["content"])}
+        if name=="append_file": return {"ok":True,"path":self.ws.append(args["path"],args["content"])}
+        if name=="replace_in_file": return {"ok":True,**self.ws.replace_in_file(args["path"],args["old"],args["new"])}
         if name=="list_files": return {"ok":True,"files":self.ws.list(args.get("path","."))}
         if name=="search": return {"ok":True,"hits":self.ws.search(args["query"],args.get("path","."))}
         if name=="terminal": return {"ok":True,**self.ws.run(args["command"],min(int(args.get("timeout",120)),300))}

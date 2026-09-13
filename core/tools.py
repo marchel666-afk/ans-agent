@@ -11,6 +11,17 @@ class Workspace:
     def read(self,path): return self._path(path).read_text(encoding="utf-8")
     def write(self,path,content):
         p=self._path(path); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(content,encoding="utf-8"); return str(p.relative_to(self.root))
+    def append(self,path,content):
+        p=self._path(path); p.parent.mkdir(parents=True,exist_ok=True)
+        with p.open("a",encoding="utf-8") as f: f.write(content)
+        return str(p.relative_to(self.root))
+    def replace_in_file(self,path,old,new):
+        p=self._path(path); text=p.read_text(encoding="utf-8")
+        n=text.count(old)
+        if n==0: raise ValueError("old text not found")
+        if n>1: raise ValueError(f"old text is not unique ({n} matches); add more context")
+        p.write_text(text.replace(old,new,1),encoding="utf-8")
+        return {"path":str(p.relative_to(self.root)),"replaced":1}
     def list(self,path="."):
         return [str(p.relative_to(self.root)) for p in self._path(path).rglob("*") if p.is_file()][:500]
     def search(self,query,path=".",max_hits=100):

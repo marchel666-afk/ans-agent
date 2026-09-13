@@ -67,3 +67,28 @@ def test_search_tool(tmp_path):
     res = ex.execute("search", {"query": "needle"})
     assert res["ok"] and len(res["hits"]) == 1
     assert res["hits"][0]["file"] == "a.py" and res["hits"][0]["line"] == 2
+
+
+def test_replace_in_file_tool(tmp_path):
+    (tmp_path / "c.py").write_text("def add(a,b):\n    return a+b\n", encoding="utf-8")
+    ex = ToolExecutor(str(tmp_path))
+    res = ex.execute("replace_in_file", {"path": "c.py", "old": "return a+b", "new": "\"\"\"sum\"\"\"\n    return a+b"})
+    assert res["ok"] and res["replaced"] == 1
+    assert '"""sum"""' in (tmp_path / "c.py").read_text()
+
+
+def test_replace_in_file_rejects_ambiguous(tmp_path):
+    import pytest
+    (tmp_path / "d.txt").write_text("x\nx\n", encoding="utf-8")
+    ex = ToolExecutor(str(tmp_path))
+    # executor raises; the ToolLoop converts this to {ok:False,error} for the model.
+    with pytest.raises(ValueError, match="unique"):
+        ex.execute("replace_in_file", {"path": "d.txt", "old": "x", "new": "y"})
+
+
+
+def test_append_file_tool(tmp_path):
+    ex = ToolExecutor(str(tmp_path))
+    ex.execute("append_file", {"path": "log.txt", "content": "line1\n"})
+    ex.execute("append_file", {"path": "log.txt", "content": "line2\n"})
+    assert (tmp_path / "log.txt").read_text() == "line1\nline2\n"
