@@ -1,0 +1,47 @@
+# Production stack for ANS Agent: app + local Ollama.
+# Access is intended to be VPN-only: ANS_BIND (from .env) should be the VPS's
+# VPN interface IP (e.g. 10.8.0.1 / 10.66.66.1). Default 127.0.0.1 = localhost
+# only (reach via SSH tunnel). Ollama has NO host port — only the app talks to it.
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+    networks: [ ansnet ]
+    # GPU is optional; on a CPU VPS it just runs slower.
+
+  ans-agent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - ANS_HOST=0.0.0.0
+      - ANS_PORT=8080
+    command: ["uvicorn","app:app","--host","0.0.0.0","--port","8080","--proxy-headers"]
+    volumes:
+      - ../data:/app/data
+      - ../workspace:/app/workspace
+    depends_on: [ ollama ]
+    networks: [ ansnet ]
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      # Bind ONLY to the VPN interface (set ANS_BIND in .env). Never 0.0.0.0.
+      - "${ANS_BIND:-127.0.0.1}:8080:8080"
+    healthcheck:
+      test: ["CMD","curl","-fsS","http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  ansnet:
+    driver: bridge
+
+volumes:
+  ollama:
