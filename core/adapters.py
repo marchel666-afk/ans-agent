@@ -30,6 +30,10 @@ class ClaudeCodeAdapter:
                 raise ProviderError("Claude Code weekly usage limit reached. Claude reports that the limit has been reached; wait for the reset or configure another provider.")
             raise ProviderError(error or f"claude exited with {p.returncode}")
         return ProviderResponse(p.stdout.strip())
+    def stream(self,prompt,**kwargs):
+        # Claude Code CLI returns the whole answer; surface it as one chunk so the
+        # /chat streaming contract holds for every provider.
+        yield self.complete(prompt,**kwargs).text
 
 class OpenAICompatibleAdapter:
     def __init__(self,name,base_url,api_key_env,model=None):
@@ -47,6 +51,28 @@ class OpenAICompatibleAdapter:
         except Exception as e: raise ProviderError(f"{self.name}: {e}") from e
         try: return ProviderResponse(data["choices"][0]["message"]["content"],data)
         except (KeyError,IndexError) as e: raise ProviderError(f"{self.name}: malformed response") from e
+    def stream(self,prompt,**kwargs):
+        key=os.getenv(self.api_key_env)
+        if not key: raise ProviderError(f"Missing {self.api_key_env}")
+        requested=kwargs.get("model")
+        aliases={"gpt","openai","gemini","google","openrouter/free"}
+        model=self.model if requested in aliases else (requested or self.model)
+        payload=json.dumps({"model":model,"messages":[{"role":"user","content":prompt}],"temperature":kwargs.get("temperature",0.2),"stream":True}).encode()
+        req=urllib.request.Request(self.base_url+"/chat/completions",data=payload,headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
+        try:
+            r=urllib.request.urlopen(req,timeout=kwargs.get("timeout",120))
+        except Exception as e: raise ProviderError(f"{self.name}: {e}") from e
+        with r:
+            for raw in r:
+                line=(raw.decode("utf-8","ignore") if isinstance(raw,bytes) else str(raw)).strip()
+                if not line or not line.startswith("data:"): continue
+                data=line[5:].strip()
+                if data=="[DONE]": break
+                try: obj=json.loads(data)
+                except Exception: continue
+                try: delta=obj["choices"][0]["delta"].get("content")
+                except (KeyError,IndexError,AttributeError): delta=None
+                if delta: yield delta
 
 class OllamaAdapter:
     name="ollama/local"
@@ -85,6 +111,23 @@ class OllamaAdapter:
             raise ProviderError(f"{self.name}: {e}") from e
         try: return ProviderResponse(data["message"]["content"],data)
         except (KeyError,TypeError) as e: raise ProviderError(f"{self.name}: malformed response") from e
+    def stream(self,prompt,**kwargs):
+        model=self._model(kwargs.get("model"))
+        payload=json.dumps({"model":model,"messages":[{"role":"user","content":prompt}],"stream":True}).encode()
+        req=urllib.request.Request(self.base_url+"/api/chat",data=payload,headers={"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
+        try:
+            r=self._open(req, timeout=kwargs.get("timeout",120))
+        except Exception as e:
+            raise ProviderError(f"{self.name}: {e}") from e
+        with r:
+            for raw in r:
+                line=(raw.decode("utf-8","ignore") if isinstance(raw,bytes) else str(raw)).strip()
+                if not line: continue
+                try: obj=json.loads(line)
+                except Exception: continue
+                chunk=(obj.get("message") or {}).get("content") if isinstance(obj,dict) else None
+                if chunk: yield chunk
+                if isinstance(obj,dict) and obj.get("done"): break
 
 def build_adapters():
     out={"claude-code":ClaudeCodeAdapter(), "ollama":OllamaAdapter()}

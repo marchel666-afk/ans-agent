@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from core.router import ModelRouter
@@ -15,7 +15,7 @@ from core.github import GitHubService
 from core.jobs import JobManager
 from core.security import get_token
 from core.profiles import ProfileRegistry
-import asyncio, os, subprocess
+import asyncio, os, subprocess, json, time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -51,6 +51,12 @@ class RunRequest(BaseModel):
     budget:float|None=None
 class ApprovalRequest(BaseModel):
     allow:bool
+class ChatRequest(BaseModel):
+    message:str
+    provider:str|None=None
+    model:str|None=None
+    session_id:str|None=None
+    history:list[dict]=[]
 class BranchRequest(BaseModel): name:str
 class CommitRequest(BaseModel): message:str
 class PRRequest(BaseModel): head:str; base:str|None=None; title:str; body:str=""; draft:bool=True
@@ -176,6 +182,46 @@ def test_model(provider:str,model:str,_:None=Depends(auth)):
 @app.post("/route")
 def route(req:RouteRequest,_:None=Depends(auth)):
     return router.choose(req.role,requires_tools=req.requires_tools,prefer_free=req.prefer_free).__dict__
+
+def _chat_prompt(history,message):
+    lines=[]
+    for h in (history or [])[-20:]:
+        role=h.get("role","user"); content=(h.get("content") or "").strip()
+        if not content: continue
+        lines.append(("User: " if role=="user" else "Assistant: ")+content)
+    lines.append("User: "+message)
+    lines.append("Assistant:")
+    return "\n".join(lines)
+
+@app.post("/chat")
+def chat(req:ChatRequest,_:None=Depends(auth)):
+    if not req.message.strip(): raise HTTPException(400,"message is required")
+    adapters=Orchestrator(router,WORKSPACE).adapters
+    if req.provider:
+        adapter=adapters.get(req.provider) or (adapters.get(req.model) if req.model else None)
+        prov=req.provider; mdl=req.model or req.provider
+    else:
+        try: cand=router.choose("planner")
+        except Exception as e: raise HTTPException(503,str(e))
+        adapter=adapters.get(cand.model) or adapters.get(cand.provider)
+        prov=cand.provider; mdl=cand.model
+    if not adapter: raise HTTPException(400,"provider unavailable")
+    s=sessions.get(req.session_id) if req.session_id else sessions.create(req.message[:80],"chat")
+    prompt=_chat_prompt(req.history,req.message)
+    s.emit("chat.user",req.message,provider=prov,model=mdl); sessions.emit(s.id,"chat.user",req.message,provider=prov,model=mdl)
+    def sse(obj): return "data: "+json.dumps(obj,ensure_ascii=False)+"\n\n"
+    def gen():
+        yield sse({"type":"start","session_id":s.id,"provider":prov,"model":mdl})
+        acc=[]; started=time.time()
+        try:
+            for delta in adapter.stream(prompt,model=mdl,cwd=WORKSPACE,timeout=300):
+                acc.append(delta); yield sse({"type":"delta","content":delta})
+        except Exception as e:
+            yield sse({"type":"error","error":str(e)[:500]}); return
+        text="".join(acc)
+        s.emit("chat.assistant",text,provider=prov,model=mdl); sessions.emit(s.id,"chat.assistant",text,provider=prov,model=mdl)
+        yield sse({"type":"done","session_id":s.id,"latency":round(time.time()-started,3)})
+    return StreamingResponse(gen(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 @app.get("/jobs/{jid}")
 def get_job(jid:str,_:None=Depends(auth)):
