@@ -6,3 +6,5 @@ pytest>=8.0
 httpx2>=0.1
 
 # Optional browser automation: playwright
+
+python-dotenv>=1.0
