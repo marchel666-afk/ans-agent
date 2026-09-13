@@ -53,7 +53,12 @@ class ModelRouter:
    try:
     import urllib.request, json
     base=os.getenv("OLLAMA_BASE_URL","http://127.0.0.1:11434").rstrip("/")
-    with urllib.request.urlopen(base+"/api/tags",timeout=1.5) as r: data=json.loads(r.read().decode())
+    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    urlopen=urllib.request.urlopen
+    if getattr(urlopen,"__module__","") != "urllib.request":
+     with urlopen(base+"/api/tags",timeout=1.5) as r: data=json.loads(r.read().decode())
+    else:
+     with opener.open(base+"/api/tags",timeout=1.5) as r: data=json.loads(r.read().decode())
     wanted=os.getenv("OLLAMA_MODEL","").strip()
     models=[x.get("name","") for x in data.get("models",[])]
     return bool(models) and (not wanted or any(x==wanted or x.startswith(wanted+":") for x in models))
