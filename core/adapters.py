@@ -69,7 +69,7 @@ class OllamaAdapter:
         if self.model:
             return self.model
         try:
-            with self._open(self.base_url+"/api/tags", timeout=2) as r: data=json.load(r)
+            with self._open(urllib.request.Request(self.base_url+"/api/tags"), timeout=2) as r: data=json.load(r)
             models=data.get("models") or []
             if models and models[0].get("name"): return models[0]["name"]
         except Exception:

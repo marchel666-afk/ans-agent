@@ -1,4 +1,5 @@
 from core.orchestrator import Orchestrator
+from core.router import ModelRouter
 from core.types import ModelCandidate
 
 
@@ -21,15 +22,17 @@ def test_executor_provider_fallback(monkeypatch, tmp_path):
             self.adapter = adapter
         def run(self, *args, **kwargs):
             return self.adapter.complete("").text
-    class FakeRouter:
+    class FakeRouter(ModelRouter):
+        # Uses the real router interface (policy_rank/score/cost_estimate/reporting)
+        # while pinning the candidate list so the executor fallback path from a
+        # weekly-limited primary to the backup provider is exercised directly.
         def rank(self, role, requires_tools=False, **kwargs):
             return [
                 ModelCandidate("anthropic", "claude-code", {"executor"}, tool_capable=True, priority=1),
                 ModelCandidate("openrouter", "backup", {"executor"}, tool_capable=True, priority=2),
             ]
-        def report_failure(self, m): pass
-        def report_success(self, m): pass
     orch.router = FakeRouter()
+    orch.router.db = str(tmp_path / "router.db")
     orch.adapters = {
         "claude-code": FakeAdapter(error="weekly limit"),
         "openrouter": FakeAdapter(text="backup executed"),

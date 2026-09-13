@@ -12,7 +12,7 @@ class Job:
  result:dict=field(default_factory=dict)
  error:str|None=None
  cancel_requested:bool=False
- timeout_seconds:int=3600
+ timeout_seconds:float=3600
  attempts:list=field(default_factory=list)
 
 class JobManager:
@@ -29,7 +29,7 @@ class JobManager:
    try:c.execute("ALTER TABLE jobs ADD COLUMN attempts TEXT DEFAULT '[]'")
    except sqlite3.OperationalError:pass
  def submit(self,session_id,fn,timeout_seconds=3600):
-  j=Job(session_id=session_id,timeout_seconds=max(1,int(timeout_seconds)))
+  j=Job(session_id=session_id,timeout_seconds=max(0.01,float(timeout_seconds)))
   with self._db() as c:c.execute("INSERT INTO jobs(id,session_id,status,created,started,finished,result,error,cancel,attempts) VALUES(?,?,?,?,?,?,?,?,?,?)",(j.id,j.session_id,j.status,j.created_at,None,None,"",None,0,"[]"))
   with self.cv:self.jobs[j.id]=j;self.q.append((j.id,fn));self.cv.notify()
   self.emit("job.created","Job queued",job_id=j.id);return j

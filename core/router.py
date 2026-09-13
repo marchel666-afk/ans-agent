@@ -17,9 +17,16 @@ class ModelRouter:
    for model,ok,fail,lat in c.execute("SELECT model,ok,fail,latency FROM model_stats"): self.stats[model]={"ok":ok,"fail":fail,"latency":lat}
    for model,n,until,category,updated in c.execute("SELECT model,failures,cooldown_until,category,updated_at FROM provider_health"):
     if until > time.time(): self.failures[model]=(n,until,category)
+ def _ensure_tables(self,c):
+  # Health/stats tables are (re)created lazily so the router stays correct even
+  # when ``self.db`` is repointed after construction (as tests do).
+  c.execute("CREATE TABLE IF NOT EXISTS model_stats(model TEXT PRIMARY KEY, ok INTEGER DEFAULT 0, fail INTEGER DEFAULT 0, latency REAL DEFAULT 0)")
+  c.execute("CREATE TABLE IF NOT EXISTS provider_health(model TEXT PRIMARY KEY, failures INTEGER DEFAULT 0, cooldown_until REAL DEFAULT 0, category TEXT DEFAULT '', updated_at REAL DEFAULT 0)")
  def _persist(self,m):
-  s=self.stats[m.model]
-  with sqlite3.connect(self.db) as c: c.execute("INSERT INTO model_stats(model,ok,fail,latency) VALUES(?,?,?,?) ON CONFLICT(model) DO UPDATE SET ok=excluded.ok,fail=excluded.fail,latency=excluded.latency",(m.model,s["ok"],s["fail"],s["latency"]))
+  s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0})
+  with sqlite3.connect(self.db) as c:
+   self._ensure_tables(c)
+   c.execute("INSERT INTO model_stats(model,ok,fail,latency) VALUES(?,?,?,?) ON CONFLICT(model) DO UPDATE SET ok=excluded.ok,fail=excluded.fail,latency=excluded.latency",(m.model,s["ok"],s["fail"],s["latency"]))
  def discover_openrouter(self, limit=100):
   import json, urllib.request
   key=os.getenv("OPENROUTER_API_KEY")
@@ -64,7 +71,13 @@ class ModelRouter:
     return bool(models) and (not wanted or any(x==wanted or x.startswith(wanted+":") for x in models))
    except Exception:
     return False
-  return bool(os.getenv(keys.get(m.provider,""))) or (m.provider=="anthropic" and self._claude_cli_available())
+  if m.provider=="anthropic":
+   return bool(os.getenv("ANTHROPIC_API_KEY")) or self._claude_cli_available()
+  env=keys.get(m.provider)
+  if env:
+   return bool(os.getenv(env))
+  # Providers without a required API key (local/custom pools) are usable.
+  return True
  def _claude_cli_available(self):
   import shutil
   return shutil.which("claude") is not None
@@ -75,16 +88,19 @@ class ModelRouter:
    free=[m for m in cs if m.free]
    if free: cs=free
   now=time.time()
-  active=[]; expired=[]
-  for m in cs:
-   state=self.failures.get(m.model)
-   if state and state[1] <= now:
-    self.failures.pop(m.model,None); self.half_open.add(m.model)
-   if self._available(m) and (max_cost is None or m.input_cost_per_million+m.output_cost_per_million<=max_cost):
-    active.append(m)
+  # Recover any expired cooldown (circuit open -> half-open) before ranking,
+  # sweeping the whole failure map so persisted health rows are cleared too.
+  expired=[model for model,state in list(self.failures.items()) if state[1] <= now]
+  for model in expired:
+   self.failures.pop(model,None); self.half_open.add(model)
   if expired:
    with sqlite3.connect(self.db) as c:
+    self._ensure_tables(c)
     for model in expired: c.execute("DELETE FROM provider_health WHERE model=?",(model,))
+  active=[]
+  for m in cs:
+   if self._available(m) and (max_cost is None or m.input_cost_per_million+m.output_cost_per_million<=max_cost):
+    active.append(m)
   active=[m for m in active if m.model not in self.failures or m.model in self.half_open]
   return sorted(active,key=lambda m:(0 if m.model in self.half_open else 1,self.score(m,role),self.failures.get(m.model,(0,0,""))[0]))
  def choose(self,role,*,requires_tools=False,prefer_free=False,max_cost=None):
@@ -151,7 +167,9 @@ class ModelRouter:
   if category=="weekly_limit": cooldown=max(base,cooldown)
   until=time.time()+cooldown
   self.failures[m.model]=(n+1,until,category)
-  with sqlite3.connect(self.db) as c: c.execute("INSERT INTO provider_health(model,failures,cooldown_until,category,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(model) DO UPDATE SET failures=excluded.failures,cooldown_until=excluded.cooldown_until,category=excluded.category,updated_at=excluded.updated_at",(m.model,n+1,until,category,time.time()))
+  with sqlite3.connect(self.db) as c:
+   self._ensure_tables(c)
+   c.execute("INSERT INTO provider_health(model,failures,cooldown_until,category,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(model) DO UPDATE SET failures=excluded.failures,cooldown_until=excluded.cooldown_until,category=excluded.category,updated_at=excluded.updated_at",(m.model,n+1,until,category,time.time()))
   s=self.stats.setdefault(m.model,{"ok":0,"fail":0,"latency":0.0}); s["fail"]+=1; self._persist(m)
   return {"category":category,"cooldown_seconds":cooldown}
  def report_latency(self,m,seconds,ok=True):
@@ -160,7 +178,9 @@ class ModelRouter:
   recovered=m.model in self.half_open
   self.half_open.discard(m.model)
   self.failures.pop(m.model,None); self._persist(m)
-  with sqlite3.connect(self.db) as c: c.execute("DELETE FROM provider_health WHERE model=?",(m.model,))
+  with sqlite3.connect(self.db) as c:
+   self._ensure_tables(c)
+   c.execute("DELETE FROM provider_health WHERE model=?",(m.model,))
   return {"ok":True}
  def circuit_view(self):
   now=time.time(); out={}
@@ -279,14 +299,6 @@ class ModelRouter:
   with sqlite3.connect(self.db) as c: c.execute("CREATE TABLE IF NOT EXISTS task_outcomes(id INTEGER PRIMARY KEY AUTOINCREMENT,model TEXT,role TEXT,success INTEGER,latency REAL,tool_calls INTEGER,repairs INTEGER,cost REAL,created_at REAL)")
   with sqlite3.connect(self.db) as c: c.execute("INSERT INTO task_outcomes(model,role,success,latency,tool_calls,repairs,cost,created_at) VALUES(?,?,?,?,?,?,?,?)",(m.model,role,int(success),float(latency),int(tool_calls),int(repairs),float(cost),time.time()))
   self.report_latency(m,latency,success)
- def learning_view(self,role=None):
-  with sqlite3.connect(self.db) as c:
-   c.execute("CREATE TABLE IF NOT EXISTS task_outcomes(id INTEGER PRIMARY KEY AUTOINCREMENT,model TEXT,role TEXT,success INTEGER,latency REAL,tool_calls INTEGER,repairs INTEGER,cost REAL,created_at REAL)")
-   q="SELECT model,role,COUNT(*),AVG(success),AVG(latency),AVG(tool_calls),AVG(repairs),AVG(cost) FROM task_outcomes"; args=()
-   if role: q+=" WHERE role=?"; args=(role,)
-   q+=" GROUP BY model,role"; rows=c.execute(q,args).fetchall()
-  return [{"model":r[0],"role":r[1],"tasks":r[2],"success_rate":round(r[3],3),"latency":round(r[4],3),"tool_calls":round(r[5],2),"repairs":round(r[6],2),"cost":round(r[7],6)} for r in rows]
-
  def learning_view(self,role=None):
   with sqlite3.connect(self.db) as c:
    c.execute("CREATE TABLE IF NOT EXISTS task_outcomes(id INTEGER PRIMARY KEY AUTOINCREMENT,model TEXT,role TEXT,success INTEGER,latency REAL,tool_calls INTEGER,repairs INTEGER,cost REAL,created_at REAL)")

@@ -6,7 +6,7 @@ class Session:
  def emit(self,kind,message,**data): self.events.append({"ts":time.time(),"kind":kind,"message":message,**data})
 class SessionStore:
  def __init__(self,db_path=None):
-  self.db_path=db_path or os.getenv("ANS_DB","./data/ans.db"); os.makedirs(os.path.dirname(os.path.abspath(self.db_path)),exist_ok=True); self._init()
+  self.db_path=db_path or os.getenv("ANS_DB","./data/ans.db"); self.sessions={}; os.makedirs(os.path.dirname(os.path.abspath(self.db_path)),exist_ok=True); self._init()
  def _db(self):
   c=sqlite3.connect(self.db_path); c.row_factory=sqlite3.Row; return c
  def _init(self):
@@ -17,8 +17,10 @@ class SessionStore:
  def create(self,task,mode):
   s=Session(task=task,mode=mode)
   with self._db() as c:c.execute("INSERT INTO sessions VALUES(?,?,?,?)",(s.id,s.task,s.mode,s.created_at))
+  self.sessions[s.id]=s
   return s
  def get(self,sid):
+  if sid in self.sessions: return self.sessions[sid]
   with self._db() as c:
    r=c.execute("SELECT * FROM sessions WHERE id=?",(sid,)).fetchone()
    if not r:return None

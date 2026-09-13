@@ -1,8 +1,11 @@
 from .types import ModelCandidate
 
 class ModelRegistry:
-    def __init__(self) -> None:
-        self.models: list[ModelCandidate] = []
+    def __init__(self, models=None) -> None:
+        # Optional seeding with an iterable of candidates keeps the registry
+        # convenient to construct in tests and when composing custom pools,
+        # while ``ModelRegistry()`` and ``ModelRegistry.default()`` keep working.
+        self.models: list[ModelCandidate] = list(models) if models else []
 
     def register(self, candidate: ModelCandidate) -> None:
         self.models.append(candidate)

@@ -288,6 +288,7 @@ async def run(req:RunRequest,_:None=Depends(auth)):
             return result
         job=jobs.submit(s.id,worker,timeout_seconds=req.timeout_seconds)
         orch.job=job
+        emit("job.created","Agent job queued",job_id=job.id)
         return {"session_id":s.id,"job_id":job.id,"status":job.status}
     except Exception as e:
         emit("run.failed",str(e)); raise HTTPException(500,str(e))

@@ -8,6 +8,7 @@ def test_weekly_limit_fallback_avoids_anthropic():
   a=ModelCandidate("anthropic","a",{"planner"},priority=1)
   o=ModelCandidate("ollama","o",{"planner"},priority=2)
   rt=ModelRouter(ModelRegistry([a,o])); rt.db=d+"/r.db"
+  rt._available=lambda m: True
   xs=rt.fallback_policy("weekly_limit","planner","balanced")
   assert all(x.provider!="anthropic" for x in xs)
 
@@ -16,6 +17,7 @@ def test_timeout_fallback_prefers_non_anthropic():
   a=ModelCandidate("anthropic","a",{"planner"},priority=1)
   o=ModelCandidate("ollama","o",{"planner"},priority=2)
   rt=ModelRouter(ModelRegistry([a,o])); rt.db=d+"/r.db"
+  rt._available=lambda m: True
   assert rt.fallback_policy("timeout","planner")[0].provider!="anthropic"
 
 
@@ -37,6 +39,7 @@ def test_failure_path_selects_fallback_after_opening_circuit():
   a=ModelCandidate("anthropic","a",{"planner"},priority=1)
   o=ModelCandidate("ollama","o",{"planner"},priority=2)
   rt=ModelRouter(ModelRegistry([a,o])); rt.db=d+"/r.db"
+  rt._available=lambda m: True
   rt.report_failure(a,error="weekly limit")
   assert rt.circuit_view()["a"]["state"]=="open"
   xs=rt.fallback_policy("weekly_limit","planner",exclude={"a"})
@@ -69,9 +72,10 @@ def test_executor_failure_uses_fallback_and_records_attempts():
   def complete(self,*args,**kwargs):
    if self.name=="a": raise RuntimeError("weekly limit")
    return type("R",(),{"text":"PASS"})()
- a=ModelCandidate("anthropic","a",{"executor"},priority=1)
- o=ModelCandidate("ollama","o",{"executor"},priority=2)
+ a=ModelCandidate("anthropic","a",{"planner","executor","reviewer","fixer"},priority=1)
+ o=ModelCandidate("ollama","o",{"planner","executor","reviewer","fixer"},priority=2)
  rt=ModelRouter(ModelRegistry([a,o]))
+ rt._available=lambda m: True
  orch=Orchestrator(router=rt)
  orch.adapters={"a":A("a"),"o":A("o")}
  orch.workspace="."

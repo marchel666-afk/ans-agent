@@ -85,10 +85,10 @@ class Orchestrator:
                 executor=ToolExecutor(self.workspace)
                 job=getattr(self,"job",None)
                 executor.job=job
-                executor.manager=getattr(self,"job_manager",None)
+                manager=getattr(self,"job_manager",None)
+                executor.manager=manager
                 output=None
                 errors=[]
-                job=getattr(self,"job",None)
                 tried=set()
                 attempt_number=0
                 while candidates:

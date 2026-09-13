@@ -4,8 +4,10 @@ def test_executor():
     m=ModelRouter().choose("executor",requires_tools=True)
     assert m.provider == "anthropic"
 
-def test_free():
-    assert ModelRouter().choose("researcher",prefer_free=True).free
+def test_free(monkeypatch):
+    r=ModelRouter()
+    monkeypatch.setattr(r,"_available",lambda m: True)
+    assert r.choose("researcher",prefer_free=True).free
 
 
 def test_claude_fallback_for_planner(monkeypatch):
