@@ -6,6 +6,7 @@ through OpenAI-compatible HTTP endpoints.
 """
 from dataclasses import dataclass
 import os, subprocess, json, urllib.request
+from urllib.error import HTTPError
 
 @dataclass
 class ProviderResponse:
@@ -13,6 +14,33 @@ class ProviderResponse:
     raw: object | None = None
 
 class ProviderError(RuntimeError): pass
+
+# --- model auto-selection ---------------------------------------------------
+# Provider model catalogues change over time (Groq/OpenRouter rename or retire
+# models), so a hardcoded model name can start returning 404. These helpers pick
+# a sensible *chat* model from a provider's live /models list as a self-healing
+# fallback when the configured name is rejected.
+_BAD_MODEL_HINTS=("whisper","tts","orpheus","guard","safety","moderation","embed",
+                  "rerank","-vl",":vl","content-safety","prompt-guard","image",
+                  "vision","diffusion","flux","audio","transcrib")
+_GOOD_MODEL_HINTS=(("gpt-oss",60),("instruct",35),("llama",28),("qwen",26),
+                   ("gemma",22),("nemotron",22),("mistral",20),("deepseek",20),
+                   ("compound",18),("-it",15),("chat",12))
+def _score_model(mid,prefer_free=False):
+    low=mid.lower()
+    if any(b in low for b in _BAD_MODEL_HINTS): return -1
+    s=0
+    for kw,w in _GOOD_MODEL_HINTS:
+        if kw in low: s+=w
+    if prefer_free:
+        s+= 40 if low.endswith(":free") else -15
+    for bad in ("mini","nano","-xs","-2b","-1b","-3b"):
+        if bad in low: s-=6
+    return s
+def _pick_model(ids,prefer_free=False):
+    ranked=sorted(((_score_model(i,prefer_free),i) for i in ids),reverse=True)
+    if ranked and ranked[0][0]>0: return ranked[0][1]
+    return ids[0] if ids else None
 
 class ClaudeCodeAdapter:
     name="anthropic/claude-code"
@@ -90,32 +118,69 @@ class AnthropicAdapter:
                     if delta: yield delta
 
 class OpenAICompatibleAdapter:
+    # model names that mean "use the adapter's configured default"
+    ALIASES={"gpt","openai","gemini","google","openrouter","openrouter/free","groq","default","auto"}
     def __init__(self,name,base_url,api_key_env,model=None):
-        self.name=name; self.base_url=base_url.rstrip("/"); self.api_key_env=api_key_env; self.model=model
+        self.name=name; self.base_url=base_url.rstrip("/"); self.api_key_env=api_key_env
+        self.model=model; self._resolved=None
+    def _resolve(self,requested):
+        # An already auto-resolved model wins; otherwise honour an explicit
+        # request, falling back to the configured default for aliases/empties.
+        if self._resolved: return self._resolved
+        if not requested or requested in self.ALIASES: return self.model
+        return requested
+    def _list_models(self,key,timeout=10):
+        req=urllib.request.Request(self.base_url+"/models",headers={"Authorization":"Bearer "+key,"User-Agent":"ANS-Agent/1.0"})
+        with urllib.request.urlopen(req,timeout=timeout) as r: data=json.load(r)
+        return [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+    def _auto_model(self,key):
+        # Called when the configured model is rejected: pick a live chat model.
+        ids=self._list_models(key)
+        pick=_pick_model(ids,prefer_free=(self.name=="openrouter"))
+        if not pick: raise ProviderError(f"{self.name}: no usable chat model available")
+        self._resolved=pick
+        return pick
+    def _payload(self,model,prompt,kwargs,stream):
+        body={"model":model,"messages":[{"role":"user","content":prompt}],"temperature":kwargs.get("temperature",0.2)}
+        if stream: body["stream"]=True
+        return json.dumps(body).encode()
+    def _open(self,model,prompt,key,kwargs,stream):
+        req=urllib.request.Request(self.base_url+"/chat/completions",data=self._payload(model,prompt,kwargs,stream),
+                                   headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
+        return urllib.request.urlopen(req,timeout=kwargs.get("timeout",120))
     def complete(self,prompt,**kwargs):
         key=os.getenv(self.api_key_env)
         if not key: raise ProviderError(f"Missing {self.api_key_env}")
-        requested=kwargs.get("model")
-        aliases={"gpt","openai","gemini","google","openrouter/free"}
-        model=self.model if requested in aliases else (requested or self.model)
-        payload=json.dumps({"model":model,"messages":[{"role":"user","content":prompt}],"temperature":kwargs.get("temperature",0.2)}).encode()
-        req=urllib.request.Request(self.base_url+"/chat/completions",data=payload,headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
-        try:
-            with urllib.request.urlopen(req,timeout=kwargs.get("timeout",120)) as r: data=json.load(r)
-        except Exception as e: raise ProviderError(f"{self.name}: {e}") from e
+        model=self._resolve(kwargs.get("model"))
+        for attempt in (1,2):
+            try:
+                with self._open(model,prompt,key,kwargs,False) as r: data=json.load(r)
+                break
+            except HTTPError as e:
+                # Bad/retired model name -> resolve a live one and retry once.
+                if e.code in (400,404) and attempt==1:
+                    try: model=self._auto_model(key); continue
+                    except Exception: pass
+                raise ProviderError(f"{self.name}: {e}") from e
+            except Exception as e:
+                raise ProviderError(f"{self.name}: {e}") from e
         try: return ProviderResponse(data["choices"][0]["message"]["content"],data)
         except (KeyError,IndexError) as e: raise ProviderError(f"{self.name}: malformed response") from e
     def stream(self,prompt,**kwargs):
         key=os.getenv(self.api_key_env)
         if not key: raise ProviderError(f"Missing {self.api_key_env}")
-        requested=kwargs.get("model")
-        aliases={"gpt","openai","gemini","google","openrouter/free"}
-        model=self.model if requested in aliases else (requested or self.model)
-        payload=json.dumps({"model":model,"messages":[{"role":"user","content":prompt}],"temperature":kwargs.get("temperature",0.2),"stream":True}).encode()
-        req=urllib.request.Request(self.base_url+"/chat/completions",data=payload,headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
-        try:
-            r=urllib.request.urlopen(req,timeout=kwargs.get("timeout",120))
-        except Exception as e: raise ProviderError(f"{self.name}: {e}") from e
+        model=self._resolve(kwargs.get("model"))
+        r=None
+        for attempt in (1,2):
+            try:
+                r=self._open(model,prompt,key,kwargs,True); break
+            except HTTPError as e:
+                if e.code in (400,404) and attempt==1:
+                    try: model=self._auto_model(key); continue
+                    except Exception: pass
+                raise ProviderError(f"{self.name}: {e}") from e
+            except Exception as e:
+                raise ProviderError(f"{self.name}: {e}") from e
         with r:
             for raw in r:
                 line=(raw.decode("utf-8","ignore") if isinstance(raw,bytes) else str(raw)).strip()
@@ -192,5 +257,5 @@ def build_adapters():
     if os.getenv("GEMINI_API_KEY"): out["gemini"]=OpenAICompatibleAdapter("google","https://generativelanguage.googleapis.com/v1beta/openai","GEMINI_API_KEY",os.getenv("GEMINI_MODEL","gemini-2.5-flash"))
     if os.getenv("OPENROUTER_API_KEY"): out["openrouter"]=OpenAICompatibleAdapter("openrouter","https://openrouter.ai/api/v1","OPENROUTER_API_KEY",os.getenv("OPENROUTER_MODEL","openrouter/free"))
     # Groq — free tier, extremely fast inference (OpenAI-compatible endpoint).
-    if os.getenv("GROQ_API_KEY"): out["groq"]=OpenAICompatibleAdapter("groq","https://api.groq.com/openai/v1","GROQ_API_KEY",os.getenv("GROQ_MODEL","llama-3.3-70b-versatile"))
+    if os.getenv("GROQ_API_KEY"): out["groq"]=OpenAICompatibleAdapter("groq","https://api.groq.com/openai/v1","GROQ_API_KEY",os.getenv("GROQ_MODEL","openai/gpt-oss-20b"))
     return out

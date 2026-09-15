@@ -155,6 +155,7 @@ async function sendChat(){
     while(true){const {value,done}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});let idx;
       while((idx=buf.indexOf('\n\n'))>=0){const chunk=buf.slice(0,idx);buf=buf.slice(idx+2);const line=chunk.split('\n').find(l=>l.startsWith('data:'));if(!line)continue;let ev;try{ev=JSON.parse(line.slice(5).trim());}catch(_){continue;}
         if(ev.type==='start'){chatSession=ev.session_id;if(ev.provider)b.dataset.model=ev.provider+'/'+ev.model;}
+        else if(ev.type==='provider'){b.dataset.model=ev.provider+'/'+ev.model;}
         else if(ev.type==='delta'){acc+=ev.content;b.innerHTML=md(acc);scrollEl($('chatThread'));}
         else if(ev.type==='error'){acc+='\n\n⚠️ '+ev.error;b.innerHTML=md(acc);}
       }

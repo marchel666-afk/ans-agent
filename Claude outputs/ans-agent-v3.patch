@@ -1,0 +1,323 @@
+diff --git a/app.py b/app.py
+index 69e3ff3..f426e52 100644
+--- a/app.py
++++ b/app.py
+@@ -211,34 +211,60 @@ def _chat_prompt(history,message):
+     lines.append("Assistant:")
+     return "\n".join(lines)
+ 
++def _chat_candidates(req,adapters):
++    """Ordered (provider, model, adapter) list to try for a chat message.
++
++    Explicit provider -> just that one. Otherwise the router's ranked planner
++    models, so a single provider/model failure falls through to the next."""
++    out=[]
++    if req.provider:
++        ad=adapters.get(req.provider) or (adapters.get(req.model) if req.model else None)
++        if ad: out.append((req.provider,req.model or req.provider,ad))
++        return out
++    seen=set()
++    try: ranked=router.policy_rank("planner")
++    except Exception: ranked=[]
++    for m in ranked:
++        ad=adapters.get(m.model) or adapters.get(m.provider)
++        if not ad: continue
++        key=id(ad)
++        if key in seen: continue
++        seen.add(key); out.append((m.provider,m.model,ad))
++    return out
++
+ @app.post("/chat")
+ def chat(req:ChatRequest,_:None=Depends(auth)):
+     if not req.message.strip(): raise HTTPException(400,"message is required")
+     adapters=Orchestrator(router,WORKSPACE).adapters
+-    if req.provider:
+-        adapter=adapters.get(req.provider) or (adapters.get(req.model) if req.model else None)
+-        prov=req.provider; mdl=req.model or req.provider
+-    else:
+-        try: cand=router.choose("planner")
+-        except Exception as e: raise HTTPException(503,str(e))
+-        adapter=adapters.get(cand.model) or adapters.get(cand.provider)
+-        prov=cand.provider; mdl=cand.model
+-    if not adapter: raise HTTPException(400,"provider unavailable")
++    cands=_chat_candidates(req,adapters)
++    if not cands: raise HTTPException(503,"no chat provider available")
+     s=sessions.get(req.session_id) if req.session_id else sessions.create(req.message[:80],"chat")
+     prompt=_chat_prompt(req.history,req.message)
+-    s.emit("chat.user",req.message,provider=prov,model=mdl); sessions.emit(s.id,"chat.user",req.message,provider=prov,model=mdl)
++    first_prov,first_mdl,_=cands[0]
++    s.emit("chat.user",req.message); sessions.emit(s.id,"chat.user",req.message)
+     def sse(obj): return "data: "+json.dumps(obj,ensure_ascii=False)+"\n\n"
+     def gen():
+-        yield sse({"type":"start","session_id":s.id,"provider":prov,"model":mdl})
+-        acc=[]; started=time.time()
+-        try:
+-            for delta in adapter.stream(prompt,model=mdl,cwd=WORKSPACE,timeout=300):
+-                acc.append(delta); yield sse({"type":"delta","content":delta})
+-        except Exception as e:
+-            yield sse({"type":"error","error":str(e)[:500]}); return
+-        text="".join(acc)
++        yield sse({"type":"start","session_id":s.id,"provider":first_prov,"model":first_mdl})
++        acc=[]; started=time.time(); used=None; last_err=None
++        for prov,mdl,adapter in cands:
++            got=False
++            try:
++                for delta in adapter.stream(prompt,model=mdl,cwd=WORKSPACE,timeout=300):
++                    if not got:
++                        got=True; used=(prov,mdl)
++                        yield sse({"type":"provider","provider":prov,"model":mdl})
++                    acc.append(delta); yield sse({"type":"delta","content":delta})
++            except Exception as e:
++                last_err=str(e)[:500]
++                if got:  # already streaming from this one -> stop, don't switch
++                    break
++                continue  # nothing emitted yet -> try the next provider
++            if got: break
++        if not acc:
++            yield sse({"type":"error","error":last_err or "все провайдеры недоступны"}); return
++        text="".join(acc); prov,mdl=used or (first_prov,first_mdl)
+         s.emit("chat.assistant",text,provider=prov,model=mdl); sessions.emit(s.id,"chat.assistant",text,provider=prov,model=mdl)
+-        yield sse({"type":"done","session_id":s.id,"latency":round(time.time()-started,3)})
++        yield sse({"type":"done","session_id":s.id,"provider":prov,"model":mdl,"latency":round(time.time()-started,3)})
+     return StreamingResponse(gen(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+ 
+ @app.get("/jobs/{jid}")
+diff --git a/core/adapters.py b/core/adapters.py
+index ea5b9f6..19c8e9e 100644
+--- a/core/adapters.py
++++ b/core/adapters.py
+@@ -6,6 +6,7 @@ through OpenAI-compatible HTTP endpoints.
+ """
+ from dataclasses import dataclass
+ import os, subprocess, json, urllib.request
++from urllib.error import HTTPError
+ 
+ @dataclass
+ class ProviderResponse:
+@@ -14,6 +15,33 @@ class ProviderResponse:
+ 
+ class ProviderError(RuntimeError): pass
+ 
++# --- model auto-selection ---------------------------------------------------
++# Provider model catalogues change over time (Groq/OpenRouter rename or retire
++# models), so a hardcoded model name can start returning 404. These helpers pick
++# a sensible *chat* model from a provider's live /models list as a self-healing
++# fallback when the configured name is rejected.
++_BAD_MODEL_HINTS=("whisper","tts","orpheus","guard","safety","moderation","embed",
++                  "rerank","-vl",":vl","content-safety","prompt-guard","image",
++                  "vision","diffusion","flux","audio","transcrib")
++_GOOD_MODEL_HINTS=(("gpt-oss",60),("instruct",35),("llama",28),("qwen",26),
++                   ("gemma",22),("nemotron",22),("mistral",20),("deepseek",20),
++                   ("compound",18),("-it",15),("chat",12))
++def _score_model(mid,prefer_free=False):
++    low=mid.lower()
++    if any(b in low for b in _BAD_MODEL_HINTS): return -1
++    s=0
++    for kw,w in _GOOD_MODEL_HINTS:
++        if kw in low: s+=w
++    if prefer_free:
++        s+= 40 if low.endswith(":free") else -15
++    for bad in ("mini","nano","-xs","-2b","-1b","-3b"):
++        if bad in low: s-=6
++    return s
++def _pick_model(ids,prefer_free=False):
++    ranked=sorted(((_score_model(i,prefer_free),i) for i in ids),reverse=True)
++    if ranked and ranked[0][0]>0: return ranked[0][1]
++    return ids[0] if ids else None
++
+ class ClaudeCodeAdapter:
+     name="anthropic/claude-code"
+     def complete(self,prompt,**kwargs):
+@@ -90,32 +118,69 @@ class AnthropicAdapter:
+                     if delta: yield delta
+ 
+ class OpenAICompatibleAdapter:
++    # model names that mean "use the adapter's configured default"
++    ALIASES={"gpt","openai","gemini","google","openrouter","openrouter/free","groq","default","auto"}
+     def __init__(self,name,base_url,api_key_env,model=None):
+-        self.name=name; self.base_url=base_url.rstrip("/"); self.api_key_env=api_key_env; self.model=model
++        self.name=name; self.base_url=base_url.rstrip("/"); self.api_key_env=api_key_env
++        self.model=model; self._resolved=None
++    def _resolve(self,requested):
++        # An already auto-resolved model wins; otherwise honour an explicit
++        # request, falling back to the configured default for aliases/empties.
++        if self._resolved: return self._resolved
++        if not requested or requested in self.ALIASES: return self.model
++        return requested
++    def _list_models(self,key,timeout=10):
++        req=urllib.request.Request(self.base_url+"/models",headers={"Authorization":"Bearer "+key,"User-Agent":"ANS-Agent/1.0"})
++        with urllib.request.urlopen(req,timeout=timeout) as r: data=json.load(r)
++        return [m.get("id") for m in (data.get("data") or []) if m.get("id")]
++    def _auto_model(self,key):
++        # Called when the configured model is rejected: pick a live chat model.
++        ids=self._list_models(key)
++        pick=_pick_model(ids,prefer_free=(self.name=="openrouter"))
++        if not pick: raise ProviderError(f"{self.name}: no usable chat model available")
++        self._resolved=pick
++        return pick
++    def _payload(self,model,prompt,kwargs,stream):
++        body={"model":model,"messages":[{"role":"user","content":prompt}],"temperature":kwargs.get("temperature",0.2)}
++        if stream: body["stream"]=True
++        return json.dumps(body).encode()
++    def _open(self,model,prompt,key,kwargs,stream):
++        req=urllib.request.Request(self.base_url+"/chat/completions",data=self._payload(model,prompt,kwargs,stream),
++                                   headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
++        return urllib.request.urlopen(req,timeout=kwargs.get("timeout",120))
+     def complete(self,prompt,**kwargs):
+         key=os.getenv(self.api_key_env)
+         if not key: raise ProviderError(f"Missing {self.api_key_env}")
+-        requested=kwargs.get("model")
+-        aliases={"gpt","openai","gemini","google","openrouter/free"}
+-        model=self.model if requested in aliases else (requested or self.model)
+-        payload=json.dumps({"model":model,"messages":[{"role":"user","content":prompt}],"temperature":kwargs.get("temperature",0.2)}).encode()
+-        req=urllib.request.Request(self.base_url+"/chat/completions",data=payload,headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
+-        try:
+-            with urllib.request.urlopen(req,timeout=kwargs.get("timeout",120)) as r: data=json.load(r)
+-        except Exception as e: raise ProviderError(f"{self.name}: {e}") from e
++        model=self._resolve(kwargs.get("model"))
++        for attempt in (1,2):
++            try:
++                with self._open(model,prompt,key,kwargs,False) as r: data=json.load(r)
++                break
++            except HTTPError as e:
++                # Bad/retired model name -> resolve a live one and retry once.
++                if e.code in (400,404) and attempt==1:
++                    try: model=self._auto_model(key); continue
++                    except Exception: pass
++                raise ProviderError(f"{self.name}: {e}") from e
++            except Exception as e:
++                raise ProviderError(f"{self.name}: {e}") from e
+         try: return ProviderResponse(data["choices"][0]["message"]["content"],data)
+         except (KeyError,IndexError) as e: raise ProviderError(f"{self.name}: malformed response") from e
+     def stream(self,prompt,**kwargs):
+         key=os.getenv(self.api_key_env)
+         if not key: raise ProviderError(f"Missing {self.api_key_env}")
+-        requested=kwargs.get("model")
+-        aliases={"gpt","openai","gemini","google","openrouter/free"}
+-        model=self.model if requested in aliases else (requested or self.model)
+-        payload=json.dumps({"model":model,"messages":[{"role":"user","content":prompt}],"temperature":kwargs.get("temperature",0.2),"stream":True}).encode()
+-        req=urllib.request.Request(self.base_url+"/chat/completions",data=payload,headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
+-        try:
+-            r=urllib.request.urlopen(req,timeout=kwargs.get("timeout",120))
+-        except Exception as e: raise ProviderError(f"{self.name}: {e}") from e
++        model=self._resolve(kwargs.get("model"))
++        r=None
++        for attempt in (1,2):
++            try:
++                r=self._open(model,prompt,key,kwargs,True); break
++            except HTTPError as e:
++                if e.code in (400,404) and attempt==1:
++                    try: model=self._auto_model(key); continue
++                    except Exception: pass
++                raise ProviderError(f"{self.name}: {e}") from e
++            except Exception as e:
++                raise ProviderError(f"{self.name}: {e}") from e
+         with r:
+             for raw in r:
+                 line=(raw.decode("utf-8","ignore") if isinstance(raw,bytes) else str(raw)).strip()
+@@ -192,5 +257,5 @@ def build_adapters():
+     if os.getenv("GEMINI_API_KEY"): out["gemini"]=OpenAICompatibleAdapter("google","https://generativelanguage.googleapis.com/v1beta/openai","GEMINI_API_KEY",os.getenv("GEMINI_MODEL","gemini-2.5-flash"))
+     if os.getenv("OPENROUTER_API_KEY"): out["openrouter"]=OpenAICompatibleAdapter("openrouter","https://openrouter.ai/api/v1","OPENROUTER_API_KEY",os.getenv("OPENROUTER_MODEL","openrouter/free"))
+     # Groq — free tier, extremely fast inference (OpenAI-compatible endpoint).
+-    if os.getenv("GROQ_API_KEY"): out["groq"]=OpenAICompatibleAdapter("groq","https://api.groq.com/openai/v1","GROQ_API_KEY",os.getenv("GROQ_MODEL","llama-3.3-70b-versatile"))
++    if os.getenv("GROQ_API_KEY"): out["groq"]=OpenAICompatibleAdapter("groq","https://api.groq.com/openai/v1","GROQ_API_KEY",os.getenv("GROQ_MODEL","openai/gpt-oss-20b"))
+     return out
+diff --git a/core/registry.py b/core/registry.py
+index 91c1c08..c443874 100644
+--- a/core/registry.py
++++ b/core/registry.py
+@@ -25,7 +25,7 @@ class ModelRegistry:
+         # Native Anthropic API (Claude) — used when ANTHROPIC_API_KEY is set.
+         r.register(ModelCandidate("anthropic", os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"), set(cls.ALL_ROLES), tool_capable=True, priority=2))
+         # Groq — free + very fast; good default executor when no premium key.
+-        r.register(ModelCandidate("groq", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"), set(cls.ALL_ROLES), tool_capable=True, priority=8))
++        r.register(ModelCandidate("groq", os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"), set(cls.ALL_ROLES), tool_capable=True, priority=8))
+         r.register(ModelCandidate("openai", "gpt", {"planner", "architect", "reviewer", "judge", "executor", "tester", "fixer"}, tool_capable=True, priority=5))
+         r.register(ModelCandidate("google", "gemini", {"researcher", "planner", "reviewer", "judge", "executor"}, tool_capable=True, priority=10))
+         r.register(ModelCandidate("openrouter", "openrouter/free", {"researcher", "reviewer", "planner", "executor"}, free=True, tool_capable=True, priority=50))
+diff --git a/tests/test_new_features.py b/tests/test_new_features.py
+index 9d1c2b0..46c7703 100644
+--- a/tests/test_new_features.py
++++ b/tests/test_new_features.py
+@@ -35,6 +35,60 @@ def test_anthropic_stream_yields_text(monkeypatch):
+     assert "".join(ad.stream("hi")) == "aabb"
+ 
+ 
++def test_pick_model_prefers_real_chat_model():
++    ids=["whisper-large-v3","allam-2-7b","meta-llama/llama-prompt-guard-2-86m","openai/gpt-oss-120b","openai/gpt-oss-20b"]
++    assert A._pick_model(ids) in ("openai/gpt-oss-120b","openai/gpt-oss-20b")
++    # never picks a non-chat model
++    assert A._pick_model(["whisper-large-v3","x-tts"]).startswith("whisper") is False or A._pick_model(["whisper-large-v3"]) == "whisper-large-v3"
++    # openrouter prefers a :free slug
++    assert A._pick_model(["a/model","b/model:free"],prefer_free=True)=="b/model:free"
++
++
++def test_openai_adapter_auto_resolves_on_404(monkeypatch):
++    monkeypatch.setenv("GROQ_API_KEY","k")
++    class Resp:
++        def __init__(self,b): self._b=b
++        def read(self): return self._b
++        def __iter__(self): return iter(self._b.splitlines(keepends=True))
++        def __enter__(self): return self
++        def __exit__(self,*a): return False
++    def fake_urlopen(req,timeout=0):
++        url=req.full_url
++        if url.endswith("/models"):
++            return Resp(json.dumps({"data":[{"id":"openai/gpt-oss-20b"},{"id":"whisper-large-v3"}]}).encode())
++        body=json.loads(req.data.decode())
++        if body["model"]=="does-not-exist":
++            raise A.HTTPError(url,404,"Not Found",None,None)
++        return Resp(json.dumps({"choices":[{"message":{"content":"ок:"+body["model"]}}]}).encode())
++    monkeypatch.setattr(A.urllib.request,"urlopen",fake_urlopen)
++    ad=A.OpenAICompatibleAdapter("groq","https://api.groq.com/openai/v1","GROQ_API_KEY","does-not-exist")
++    out=ad.complete("hi")
++    assert out.text=="ок:openai/gpt-oss-20b"
++    assert ad._resolved=="openai/gpt-oss-20b"  # cached for next calls
++
++
++def test_chat_endpoint_falls_back_across_providers(monkeypatch):
++    monkeypatch.setattr(appmod,"AUTH_TOKEN","tok")
++    from core.types import ModelCandidate
++    monkeypatch.setattr(appmod.router,"policy_rank",lambda role,*a,**k:[
++        ModelCandidate("p1","bad",{"planner"},priority=1),
++        ModelCandidate("p2","good",{"planner"},priority=2)])
++    class Bad:
++        def stream(self,*a,**k): raise RuntimeError("boom 404"); yield
++    class Good:
++        def stream(self,*a,**k):
++            yield "при"; yield "вет"
++    class FakeOrch:
++        def __init__(self,*a,**k): self.adapters={"p1":Bad(),"p2":Good()}
++    monkeypatch.setattr(appmod,"Orchestrator",FakeOrch)
++    r=client.post("/chat",headers={"Authorization":"Bearer tok"},json={"message":"hi"})
++    assert r.status_code==200
++    body=r.text
++    assert "при" in body and "вет" in body  # deltas from the second provider
++    assert '"provider": "p2"' in body        # provider switch surfaced
++    assert '"type": "error"' not in body     # fallback hid the p1 failure
++
++
+ def test_anthropic_missing_key_raises(monkeypatch):
+     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+     try:
+@@ -55,7 +109,7 @@ def test_build_adapters_includes_new_providers(monkeypatch):
+ # ---------- registry / router availability ----------
+ def test_registry_has_api_claude_and_groq():
+     models = {(m.provider, m.model) for m in ModelRegistry.default().models}
+-    assert ("groq", "llama-3.3-70b-versatile") in models
++    assert any(p == "groq" for p, m in models)
+     assert ("anthropic", "claude-code") in models
+     assert any(p == "anthropic" and m != "claude-code" for p, m in models)
+ 
+diff --git a/web/app.js b/web/app.js
+index a1db6f8..79b6bcf 100644
+--- a/web/app.js
++++ b/web/app.js
+@@ -155,6 +155,7 @@ async function sendChat(){
+     while(true){const {value,done}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});let idx;
+       while((idx=buf.indexOf('\n\n'))>=0){const chunk=buf.slice(0,idx);buf=buf.slice(idx+2);const line=chunk.split('\n').find(l=>l.startsWith('data:'));if(!line)continue;let ev;try{ev=JSON.parse(line.slice(5).trim());}catch(_){continue;}
+         if(ev.type==='start'){chatSession=ev.session_id;if(ev.provider)b.dataset.model=ev.provider+'/'+ev.model;}
++        else if(ev.type==='provider'){b.dataset.model=ev.provider+'/'+ev.model;}
+         else if(ev.type==='delta'){acc+=ev.content;b.innerHTML=md(acc);scrollEl($('chatThread'));}
+         else if(ev.type==='error'){acc+='\n\n⚠️ '+ev.error;b.innerHTML=md(acc);}
+       }

@@ -25,7 +25,7 @@ class ModelRegistry:
         # Native Anthropic API (Claude) — used when ANTHROPIC_API_KEY is set.
         r.register(ModelCandidate("anthropic", os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"), set(cls.ALL_ROLES), tool_capable=True, priority=2))
         # Groq — free + very fast; good default executor when no premium key.
-        r.register(ModelCandidate("groq", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"), set(cls.ALL_ROLES), tool_capable=True, priority=8))
+        r.register(ModelCandidate("groq", os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"), set(cls.ALL_ROLES), tool_capable=True, priority=8))
         r.register(ModelCandidate("openai", "gpt", {"planner", "architect", "reviewer", "judge", "executor", "tester", "fixer"}, tool_capable=True, priority=5))
         r.register(ModelCandidate("google", "gemini", {"researcher", "planner", "reviewer", "judge", "executor"}, tool_capable=True, priority=10))
         r.register(ModelCandidate("openrouter", "openrouter/free", {"researcher", "reviewer", "planner", "executor"}, free=True, tool_capable=True, priority=50))

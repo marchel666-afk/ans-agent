@@ -211,34 +211,60 @@ def _chat_prompt(history,message):
     lines.append("Assistant:")
     return "\n".join(lines)
 
+def _chat_candidates(req,adapters):
+    """Ordered (provider, model, adapter) list to try for a chat message.
+
+    Explicit provider -> just that one. Otherwise the router's ranked planner
+    models, so a single provider/model failure falls through to the next."""
+    out=[]
+    if req.provider:
+        ad=adapters.get(req.provider) or (adapters.get(req.model) if req.model else None)
+        if ad: out.append((req.provider,req.model or req.provider,ad))
+        return out
+    seen=set()
+    try: ranked=router.policy_rank("planner")
+    except Exception: ranked=[]
+    for m in ranked:
+        ad=adapters.get(m.model) or adapters.get(m.provider)
+        if not ad: continue
+        key=id(ad)
+        if key in seen: continue
+        seen.add(key); out.append((m.provider,m.model,ad))
+    return out
+
 @app.post("/chat")
 def chat(req:ChatRequest,_:None=Depends(auth)):
     if not req.message.strip(): raise HTTPException(400,"message is required")
     adapters=Orchestrator(router,WORKSPACE).adapters
-    if req.provider:
-        adapter=adapters.get(req.provider) or (adapters.get(req.model) if req.model else None)
-        prov=req.provider; mdl=req.model or req.provider
-    else:
-        try: cand=router.choose("planner")
-        except Exception as e: raise HTTPException(503,str(e))
-        adapter=adapters.get(cand.model) or adapters.get(cand.provider)
-        prov=cand.provider; mdl=cand.model
-    if not adapter: raise HTTPException(400,"provider unavailable")
+    cands=_chat_candidates(req,adapters)
+    if not cands: raise HTTPException(503,"no chat provider available")
     s=sessions.get(req.session_id) if req.session_id else sessions.create(req.message[:80],"chat")
     prompt=_chat_prompt(req.history,req.message)
-    s.emit("chat.user",req.message,provider=prov,model=mdl); sessions.emit(s.id,"chat.user",req.message,provider=prov,model=mdl)
+    first_prov,first_mdl,_=cands[0]
+    s.emit("chat.user",req.message); sessions.emit(s.id,"chat.user",req.message)
     def sse(obj): return "data: "+json.dumps(obj,ensure_ascii=False)+"\n\n"
     def gen():
-        yield sse({"type":"start","session_id":s.id,"provider":prov,"model":mdl})
-        acc=[]; started=time.time()
-        try:
-            for delta in adapter.stream(prompt,model=mdl,cwd=WORKSPACE,timeout=300):
-                acc.append(delta); yield sse({"type":"delta","content":delta})
-        except Exception as e:
-            yield sse({"type":"error","error":str(e)[:500]}); return
-        text="".join(acc)
+        yield sse({"type":"start","session_id":s.id,"provider":first_prov,"model":first_mdl})
+        acc=[]; started=time.time(); used=None; last_err=None
+        for prov,mdl,adapter in cands:
+            got=False
+            try:
+                for delta in adapter.stream(prompt,model=mdl,cwd=WORKSPACE,timeout=300):
+                    if not got:
+                        got=True; used=(prov,mdl)
+                        yield sse({"type":"provider","provider":prov,"model":mdl})
+                    acc.append(delta); yield sse({"type":"delta","content":delta})
+            except Exception as e:
+                last_err=str(e)[:500]
+                if got:  # already streaming from this one -> stop, don't switch
+                    break
+                continue  # nothing emitted yet -> try the next provider
+            if got: break
+        if not acc:
+            yield sse({"type":"error","error":last_err or "все провайдеры недоступны"}); return
+        text="".join(acc); prov,mdl=used or (first_prov,first_mdl)
         s.emit("chat.assistant",text,provider=prov,model=mdl); sessions.emit(s.id,"chat.assistant",text,provider=prov,model=mdl)
-        yield sse({"type":"done","session_id":s.id,"latency":round(time.time()-started,3)})
+        yield sse({"type":"done","session_id":s.id,"provider":prov,"model":mdl,"latency":round(time.time()-started,3)})
     return StreamingResponse(gen(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 @app.get("/jobs/{jid}")
