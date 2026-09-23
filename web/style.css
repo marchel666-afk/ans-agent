@@ -55,6 +55,7 @@ main{display:block}
 .act-plan{color:#cdb3ff}.act-model{color:#8fd0ff}.act-step{color:#e8eaed;font-weight:600}
 .act-tool{color:#f0c674}.act-toolres{color:#7f8994}.act-review{color:#b7c3cf}
 .act-ok{color:#75d78c}.act-warn{color:#e0b050}.act-err,.act-error{color:#e77b7b}.act-info{color:#8c96a2}
+.act-assistant{color:#e3e8ee;border-bottom:0;padding:6px 0;line-height:1.5;font-family:Inter,system-ui,sans-serif}
 .agent-final{margin-top:10px}
 .final-good{color:#75d78c;font-weight:650;margin-bottom:6px}
 .final-bad{color:#e77b7b;font-weight:650}

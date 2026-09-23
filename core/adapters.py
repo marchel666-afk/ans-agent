@@ -42,6 +42,85 @@ def _pick_model(ids,prefer_free=False):
     if ranked and ranked[0][0]>0: return ranked[0][1]
     return ids[0] if ids else None
 
+# --- native tool-calling helpers -------------------------------------------
+# The agent loop keeps a provider-neutral "normalized" message list; each
+# adapter's chat() translates it to the provider's wire format:
+#   {"role":"system"|"user","content":str}
+#   {"role":"assistant","content":str,"tool_calls":[{"id","name","args"}]}
+#   {"role":"tool","tool_call_id":str,"name":str,"content":str}
+import re as _re
+def _extract_json_obj(text):
+    for line in (text or "").splitlines():
+        line=line.strip().strip("`").strip()
+        if line.startswith("{") and line.endswith("}"):
+            try: return json.loads(line)
+            except Exception: pass
+    m=_re.search(r"\{.*\}",text or "",_re.S)
+    if m:
+        try: return json.loads(m.group(0))
+        except Exception: pass
+    return None
+
+def _to_openai_messages(messages):
+    out=[]
+    for m in messages:
+        role=m.get("role")
+        if role=="assistant" and m.get("tool_calls"):
+            out.append({"role":"assistant","content":m.get("content") or "",
+                        "tool_calls":[{"id":tc["id"],"type":"function",
+                                       "function":{"name":tc["name"],"arguments":json.dumps(tc.get("args") or {},ensure_ascii=False)}}
+                                      for tc in m["tool_calls"]]})
+        elif role=="tool":
+            out.append({"role":"tool","tool_call_id":m.get("tool_call_id"),"content":m.get("content") or ""})
+        else:
+            out.append({"role":role,"content":m.get("content") or ""})
+    return out
+
+def _to_anthropic(messages):
+    system=[]; out=[]
+    for m in messages:
+        role=m.get("role")
+        if role=="system":
+            if m.get("content"): system.append(m["content"]); continue
+        if role=="tool":
+            block={"type":"tool_result","tool_use_id":m.get("tool_call_id"),"content":m.get("content") or ""}
+            if out and out[-1]["role"]=="user" and isinstance(out[-1]["content"],list):
+                out[-1]["content"].append(block)
+            else:
+                out.append({"role":"user","content":[block]})
+        elif role=="assistant":
+            content=[]
+            if m.get("content"): content.append({"type":"text","text":m["content"]})
+            for tc in (m.get("tool_calls") or []):
+                content.append({"type":"tool_use","id":tc["id"],"name":tc["name"],"input":tc.get("args") or {}})
+            out.append({"role":"assistant","content":content or [{"type":"text","text":""}]})
+        else:  # user / system-as-user fallback
+            out.append({"role":"user","content":[{"type":"text","text":m.get("content") or ""}]})
+    return "\n\n".join(system), out
+
+def _jsonline_chat(complete_fn, messages, tools, **kwargs):
+    """Fallback native-chat for providers without function-calling (CLI/Ollama):
+    serialize the conversation + tool catalogue and expect one JSON tool line."""
+    from .tool_schema import catalogue_text
+    parts=[]
+    for m in messages:
+        role=m.get("role")
+        if role=="system": parts.append(m.get("content") or "")
+        elif role=="user": parts.append("USER: "+(m.get("content") or ""))
+        elif role=="assistant":
+            if m.get("content"): parts.append("ASSISTANT: "+m["content"])
+            for tc in (m.get("tool_calls") or []): parts.append("ASSISTANT_TOOL: "+tc["name"]+" "+json.dumps(tc.get("args") or {},ensure_ascii=False))
+        elif role=="tool": parts.append("TOOL_RESULT("+(m.get("name") or "")+"): "+(m.get("content") or "")[:2000])
+    prompt=("\n\n".join(parts)+
+            "\n\nДоступные инструменты:\n"+catalogue_text()+
+            "\n\nВыведи РОВНО одну строку JSON: {\"tool\":\"<имя>\",\"args\":{...}}. "
+            "Когда задача выполнена — {\"tool\":\"finish\",\"args\":{\"summary\":\"...\"}}.")
+    text=complete_fn(prompt,**kwargs).text.strip()
+    obj=_extract_json_obj(text)
+    if obj and obj.get("tool"):
+        return {"text":"","tool_calls":[{"id":"call_1","name":obj["tool"],"args":obj.get("args") or {}}],"raw":text}
+    return {"text":text,"tool_calls":[],"raw":text}
+
 class ClaudeCodeAdapter:
     name="anthropic/claude-code"
     def complete(self,prompt,**kwargs):
@@ -62,6 +141,9 @@ class ClaudeCodeAdapter:
         # Claude Code CLI returns the whole answer; surface it as one chunk so the
         # /chat streaming contract holds for every provider.
         yield self.complete(prompt,**kwargs).text
+    def chat(self,messages,**kwargs):
+        # No native tool-calling; fall back to the JSON-line protocol.
+        return _jsonline_chat(self.complete,messages,None,**kwargs)
 
 class AnthropicAdapter:
     """Native Anthropic Messages API adapter (https://api.anthropic.com/v1/messages).
@@ -95,6 +177,22 @@ class AnthropicAdapter:
             text="".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
             return ProviderResponse(text,data)
         except (KeyError,TypeError) as e: raise ProviderError("anthropic: malformed response") from e
+    def chat(self,messages,**kwargs):
+        from .tool_schema import anthropic_tools
+        key=os.getenv(self.api_key_env)
+        if not key: raise ProviderError(f"Missing {self.api_key_env}")
+        model=self._resolve(kwargs.get("model"))
+        system,msgs=_to_anthropic(messages)
+        body={"model":model,"max_tokens":kwargs.get("max_tokens",4096),"messages":msgs,"tools":anthropic_tools()}
+        if system: body["system"]=system
+        req=urllib.request.Request(self.base_url+"/messages",data=json.dumps(body,ensure_ascii=False).encode(),headers=self._headers(key))
+        try:
+            with urllib.request.urlopen(req,timeout=kwargs.get("timeout",180)) as r: data=json.load(r)
+        except Exception as e: raise ProviderError(f"anthropic: {e}") from e
+        text="".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
+        calls=[{"id":b.get("id"),"name":b.get("name"),"args":b.get("input") or {}}
+               for b in data.get("content",[]) if b.get("type")=="tool_use"]
+        return {"text":text,"tool_calls":calls,"raw":data}
     def stream(self,prompt,**kwargs):
         key=os.getenv(self.api_key_env)
         if not key: raise ProviderError(f"Missing {self.api_key_env}")
@@ -166,6 +264,40 @@ class OpenAICompatibleAdapter:
                 raise ProviderError(f"{self.name}: {e}") from e
         try: return ProviderResponse(data["choices"][0]["message"]["content"],data)
         except (KeyError,IndexError) as e: raise ProviderError(f"{self.name}: malformed response") from e
+    def chat(self,messages,**kwargs):
+        # Native OpenAI-style tool-calling used by the unified agent loop.
+        from .tool_schema import openai_tools
+        key=os.getenv(self.api_key_env)
+        if not key: raise ProviderError(f"Missing {self.api_key_env}")
+        model=self._resolve(kwargs.get("model"))
+        conv=_to_openai_messages(messages)
+        def build(m):
+            body={"model":m,"messages":conv,"temperature":kwargs.get("temperature",0.3),
+                  "tools":openai_tools(),"tool_choice":"auto"}
+            return json.dumps(body,ensure_ascii=False).encode()
+        data=None
+        for attempt in (1,2):
+            try:
+                req=urllib.request.Request(self.base_url+"/chat/completions",data=build(model),
+                                           headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
+                with urllib.request.urlopen(req,timeout=kwargs.get("timeout",180)) as r: data=json.load(r)
+                break
+            except HTTPError as e:
+                if e.code in (400,404) and attempt==1:
+                    try: model=self._auto_model(key); continue
+                    except Exception: pass
+                raise ProviderError(f"{self.name}: {e}") from e
+            except Exception as e:
+                raise ProviderError(f"{self.name}: {e}") from e
+        try: msg=data["choices"][0]["message"]
+        except (KeyError,IndexError,TypeError) as e: raise ProviderError(f"{self.name}: malformed response") from e
+        calls=[]
+        for tc in (msg.get("tool_calls") or []):
+            fn=tc.get("function") or {}
+            try: a=json.loads(fn.get("arguments") or "{}")
+            except Exception: a={}
+            calls.append({"id":tc.get("id") or ("call_"+str(len(calls)+1)),"name":fn.get("name"),"args":a})
+        return {"text":msg.get("content") or "","tool_calls":calls,"raw":data}
     def stream(self,prompt,**kwargs):
         key=os.getenv(self.api_key_env)
         if not key: raise ProviderError(f"Missing {self.api_key_env}")
@@ -247,6 +379,9 @@ class OllamaAdapter:
                 chunk=(obj.get("message") or {}).get("content") if isinstance(obj,dict) else None
                 if chunk: yield chunk
                 if isinstance(obj,dict) and obj.get("done"): break
+    def chat(self,messages,**kwargs):
+        # Local models: JSON-line tool protocol (no native function-calling).
+        return _jsonline_chat(self.complete,messages,None,**kwargs)
 
 def build_adapters():
     out={"claude-code":ClaudeCodeAdapter(), "ollama":OllamaAdapter()}

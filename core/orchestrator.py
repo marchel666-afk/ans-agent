@@ -68,7 +68,22 @@ class Orchestrator:
         except Exception:
             return ""
 
+    def run_solo(self,task,max_iterations=40,policy="balanced",budget=None):
+        """Unified single-loop agent (Phase 1)."""
+        from .agent_loop import AgentLoop
+        from .tool_executor import ToolExecutor
+        executor=ToolExecutor(self.workspace)
+        executor.job=getattr(self,"job",None); executor.manager=getattr(self,"job_manager",None)
+        loop=AgentLoop(self.router,self.adapters,executor,emit=self.emit,approval=self.approval,
+                       session_id=self.session_id,job=getattr(self,"job",None),
+                       job_manager=getattr(self,"job_manager",None),profile=getattr(self,"profile",None),
+                       policy=policy,budget=budget,memory=self.memory)
+        result=loop.run(task,max_steps=max(1,min(max_iterations,60)))
+        return result
+
     def run(self,task,mode="agent",max_iterations=30,policy="balanced",budget=None):
+        if mode=="solo":
+            return self.run_solo(task,max_iterations=max_iterations,policy=policy,budget=budget)
         original_task=task
         self.policy=policy
         self.budget=budget

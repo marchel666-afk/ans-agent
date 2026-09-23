@@ -96,6 +96,7 @@ function agentEvent(x){
   if(k==='run.started')actLine('info','▸ Задача принята ('+(x.mode||'agent')+')');
   else if(k==='profile.selected')actLine('info','▸ Профиль: '+esc(String(m)));
   else if(k==='task.graph'){let n=null;try{const p=typeof m==='string'?JSON.parse(m):m;n=Array.isArray(p)?p.length:(p&&p.nodes?Object.keys(p.nodes).length:null);}catch(_){}actLine('plan','🗺 План'+(n?': '+n+' шаг(ов)':' составлен'));}
+  else if(k==='assistant'){const d=document.createElement('div');d.className='act act-assistant';d.innerHTML=md(String(m));agentActivity&&agentActivity.appendChild(d);scrollEl($('agentThread'));}
   else if(k==='provider.selected')actLine('model','→ '+esc(String(m))+(x.role?' · '+x.role:''));
   else if(k==='step.started')actLine('step','● '+esc(String(m)));
   else if(k==='tool.call')actLine('tool','🔧 '+esc(String(m))+' '+esc(JSON.stringify(x.args||{}).slice(0,160)));

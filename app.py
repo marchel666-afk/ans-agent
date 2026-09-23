@@ -357,7 +357,7 @@ def workspace_diff(_:None=Depends(auth)): return {"diff":GitWorkspace(WORKSPACE)
 @app.post("/run")
 async def run(req:RunRequest,_:None=Depends(auth)):
     if not req.task.strip(): raise HTTPException(400,"task is required")
-    if req.mode not in {"chat","agent","autopilot","best_of_n"}: raise HTTPException(400,"invalid mode")
+    if req.mode not in {"chat","agent","autopilot","best_of_n","solo"}: raise HTTPException(400,"invalid mode")
     s=sessions.get(req.session_id) if req.session_id else sessions.create(req.task,req.mode)
     run_ws=WORKSPACE
     if req.workspace:

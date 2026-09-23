@@ -1,0 +1,622 @@
+diff --git a/app.py b/app.py
+index f426e52..791c3a3 100644
+--- a/app.py
++++ b/app.py
+@@ -357,7 +357,7 @@ def workspace_diff(_:None=Depends(auth)): return {"diff":GitWorkspace(WORKSPACE)
+ @app.post("/run")
+ async def run(req:RunRequest,_:None=Depends(auth)):
+     if not req.task.strip(): raise HTTPException(400,"task is required")
+-    if req.mode not in {"chat","agent","autopilot","best_of_n"}: raise HTTPException(400,"invalid mode")
++    if req.mode not in {"chat","agent","autopilot","best_of_n","solo"}: raise HTTPException(400,"invalid mode")
+     s=sessions.get(req.session_id) if req.session_id else sessions.create(req.task,req.mode)
+     run_ws=WORKSPACE
+     if req.workspace:
+diff --git a/core/adapters.py b/core/adapters.py
+index 19c8e9e..3eee0b6 100644
+--- a/core/adapters.py
++++ b/core/adapters.py
+@@ -42,6 +42,85 @@ def _pick_model(ids,prefer_free=False):
+     if ranked and ranked[0][0]>0: return ranked[0][1]
+     return ids[0] if ids else None
+ 
++# --- native tool-calling helpers -------------------------------------------
++# The agent loop keeps a provider-neutral "normalized" message list; each
++# adapter's chat() translates it to the provider's wire format:
++#   {"role":"system"|"user","content":str}
++#   {"role":"assistant","content":str,"tool_calls":[{"id","name","args"}]}
++#   {"role":"tool","tool_call_id":str,"name":str,"content":str}
++import re as _re
++def _extract_json_obj(text):
++    for line in (text or "").splitlines():
++        line=line.strip().strip("`").strip()
++        if line.startswith("{") and line.endswith("}"):
++            try: return json.loads(line)
++            except Exception: pass
++    m=_re.search(r"\{.*\}",text or "",_re.S)
++    if m:
++        try: return json.loads(m.group(0))
++        except Exception: pass
++    return None
++
++def _to_openai_messages(messages):
++    out=[]
++    for m in messages:
++        role=m.get("role")
++        if role=="assistant" and m.get("tool_calls"):
++            out.append({"role":"assistant","content":m.get("content") or "",
++                        "tool_calls":[{"id":tc["id"],"type":"function",
++                                       "function":{"name":tc["name"],"arguments":json.dumps(tc.get("args") or {},ensure_ascii=False)}}
++                                      for tc in m["tool_calls"]]})
++        elif role=="tool":
++            out.append({"role":"tool","tool_call_id":m.get("tool_call_id"),"content":m.get("content") or ""})
++        else:
++            out.append({"role":role,"content":m.get("content") or ""})
++    return out
++
++def _to_anthropic(messages):
++    system=[]; out=[]
++    for m in messages:
++        role=m.get("role")
++        if role=="system":
++            if m.get("content"): system.append(m["content"]); continue
++        if role=="tool":
++            block={"type":"tool_result","tool_use_id":m.get("tool_call_id"),"content":m.get("content") or ""}
++            if out and out[-1]["role"]=="user" and isinstance(out[-1]["content"],list):
++                out[-1]["content"].append(block)
++            else:
++                out.append({"role":"user","content":[block]})
++        elif role=="assistant":
++            content=[]
++            if m.get("content"): content.append({"type":"text","text":m["content"]})
++            for tc in (m.get("tool_calls") or []):
++                content.append({"type":"tool_use","id":tc["id"],"name":tc["name"],"input":tc.get("args") or {}})
++            out.append({"role":"assistant","content":content or [{"type":"text","text":""}]})
++        else:  # user / system-as-user fallback
++            out.append({"role":"user","content":[{"type":"text","text":m.get("content") or ""}]})
++    return "\n\n".join(system), out
++
++def _jsonline_chat(complete_fn, messages, tools, **kwargs):
++    """Fallback native-chat for providers without function-calling (CLI/Ollama):
++    serialize the conversation + tool catalogue and expect one JSON tool line."""
++    from .tool_schema import catalogue_text
++    parts=[]
++    for m in messages:
++        role=m.get("role")
++        if role=="system": parts.append(m.get("content") or "")
++        elif role=="user": parts.append("USER: "+(m.get("content") or ""))
++        elif role=="assistant":
++            if m.get("content"): parts.append("ASSISTANT: "+m["content"])
++            for tc in (m.get("tool_calls") or []): parts.append("ASSISTANT_TOOL: "+tc["name"]+" "+json.dumps(tc.get("args") or {},ensure_ascii=False))
++        elif role=="tool": parts.append("TOOL_RESULT("+(m.get("name") or "")+"): "+(m.get("content") or "")[:2000])
++    prompt=("\n\n".join(parts)+
++            "\n\nДоступные инструменты:\n"+catalogue_text()+
++            "\n\nВыведи РОВНО одну строку JSON: {\"tool\":\"<имя>\",\"args\":{...}}. "
++            "Когда задача выполнена — {\"tool\":\"finish\",\"args\":{\"summary\":\"...\"}}.")
++    text=complete_fn(prompt,**kwargs).text.strip()
++    obj=_extract_json_obj(text)
++    if obj and obj.get("tool"):
++        return {"text":"","tool_calls":[{"id":"call_1","name":obj["tool"],"args":obj.get("args") or {}}],"raw":text}
++    return {"text":text,"tool_calls":[],"raw":text}
++
+ class ClaudeCodeAdapter:
+     name="anthropic/claude-code"
+     def complete(self,prompt,**kwargs):
+@@ -62,6 +141,9 @@ class ClaudeCodeAdapter:
+         # Claude Code CLI returns the whole answer; surface it as one chunk so the
+         # /chat streaming contract holds for every provider.
+         yield self.complete(prompt,**kwargs).text
++    def chat(self,messages,**kwargs):
++        # No native tool-calling; fall back to the JSON-line protocol.
++        return _jsonline_chat(self.complete,messages,None,**kwargs)
+ 
+ class AnthropicAdapter:
+     """Native Anthropic Messages API adapter (https://api.anthropic.com/v1/messages).
+@@ -95,6 +177,22 @@ class AnthropicAdapter:
+             text="".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
+             return ProviderResponse(text,data)
+         except (KeyError,TypeError) as e: raise ProviderError("anthropic: malformed response") from e
++    def chat(self,messages,**kwargs):
++        from .tool_schema import anthropic_tools
++        key=os.getenv(self.api_key_env)
++        if not key: raise ProviderError(f"Missing {self.api_key_env}")
++        model=self._resolve(kwargs.get("model"))
++        system,msgs=_to_anthropic(messages)
++        body={"model":model,"max_tokens":kwargs.get("max_tokens",4096),"messages":msgs,"tools":anthropic_tools()}
++        if system: body["system"]=system
++        req=urllib.request.Request(self.base_url+"/messages",data=json.dumps(body,ensure_ascii=False).encode(),headers=self._headers(key))
++        try:
++            with urllib.request.urlopen(req,timeout=kwargs.get("timeout",180)) as r: data=json.load(r)
++        except Exception as e: raise ProviderError(f"anthropic: {e}") from e
++        text="".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
++        calls=[{"id":b.get("id"),"name":b.get("name"),"args":b.get("input") or {}}
++               for b in data.get("content",[]) if b.get("type")=="tool_use"]
++        return {"text":text,"tool_calls":calls,"raw":data}
+     def stream(self,prompt,**kwargs):
+         key=os.getenv(self.api_key_env)
+         if not key: raise ProviderError(f"Missing {self.api_key_env}")
+@@ -166,6 +264,40 @@ class OpenAICompatibleAdapter:
+                 raise ProviderError(f"{self.name}: {e}") from e
+         try: return ProviderResponse(data["choices"][0]["message"]["content"],data)
+         except (KeyError,IndexError) as e: raise ProviderError(f"{self.name}: malformed response") from e
++    def chat(self,messages,**kwargs):
++        # Native OpenAI-style tool-calling used by the unified agent loop.
++        from .tool_schema import openai_tools
++        key=os.getenv(self.api_key_env)
++        if not key: raise ProviderError(f"Missing {self.api_key_env}")
++        model=self._resolve(kwargs.get("model"))
++        conv=_to_openai_messages(messages)
++        def build(m):
++            body={"model":m,"messages":conv,"temperature":kwargs.get("temperature",0.3),
++                  "tools":openai_tools(),"tool_choice":"auto"}
++            return json.dumps(body,ensure_ascii=False).encode()
++        data=None
++        for attempt in (1,2):
++            try:
++                req=urllib.request.Request(self.base_url+"/chat/completions",data=build(model),
++                                           headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","User-Agent":"ANS-Agent/1.0"})
++                with urllib.request.urlopen(req,timeout=kwargs.get("timeout",180)) as r: data=json.load(r)
++                break
++            except HTTPError as e:
++                if e.code in (400,404) and attempt==1:
++                    try: model=self._auto_model(key); continue
++                    except Exception: pass
++                raise ProviderError(f"{self.name}: {e}") from e
++            except Exception as e:
++                raise ProviderError(f"{self.name}: {e}") from e
++        try: msg=data["choices"][0]["message"]
++        except (KeyError,IndexError,TypeError) as e: raise ProviderError(f"{self.name}: malformed response") from e
++        calls=[]
++        for tc in (msg.get("tool_calls") or []):
++            fn=tc.get("function") or {}
++            try: a=json.loads(fn.get("arguments") or "{}")
++            except Exception: a={}
++            calls.append({"id":tc.get("id") or ("call_"+str(len(calls)+1)),"name":fn.get("name"),"args":a})
++        return {"text":msg.get("content") or "","tool_calls":calls,"raw":data}
+     def stream(self,prompt,**kwargs):
+         key=os.getenv(self.api_key_env)
+         if not key: raise ProviderError(f"Missing {self.api_key_env}")
+@@ -247,6 +379,9 @@ class OllamaAdapter:
+                 chunk=(obj.get("message") or {}).get("content") if isinstance(obj,dict) else None
+                 if chunk: yield chunk
+                 if isinstance(obj,dict) and obj.get("done"): break
++    def chat(self,messages,**kwargs):
++        # Local models: JSON-line tool protocol (no native function-calling).
++        return _jsonline_chat(self.complete,messages,None,**kwargs)
+ 
+ def build_adapters():
+     out={"claude-code":ClaudeCodeAdapter(), "ollama":OllamaAdapter()}
+diff --git a/core/agent_loop.py b/core/agent_loop.py
+new file mode 100644
+index 0000000..19931d2
+--- /dev/null
++++ b/core/agent_loop.py
+@@ -0,0 +1,180 @@
++"""Unified agent loop (Phase 1).
++
++One continuous loop in a single thread: the model receives the task plus the
++full running history and decides, each turn, whether to think, call tools, or
++finish — instead of the old rigid planner→executor→reviewer→fixer pipeline.
++
++Provider-neutral: uses adapter.chat() (native OpenAI/Anthropic tool-calling,
++with a JSON-line fallback for CLI/Ollama), the shared tool catalogue, and the
++existing ModelRouter for model selection + adaptive fallback.
++"""
++import json, time
++from .adapters import ProviderError
++from .tool_schema import READONLY
++
++SYSTEM_PROMPT = (
++    "Ты — ANS, автономный универсальный ИИ-агент. Решаешь ЛЮБЫЕ задачи "
++    "(код, исследование, тексты, данные, работа с файлами) с помощью инструментов "
++    "в изолированной рабочей области. Работаешь сам, до результата.\n\n"
++    "Принципы:\n"
++    "1. Сначала пойми задачу и осмотрись (list_files/read_file/search), потом действуй.\n"
++    "2. Делай маленькими проверяемыми шагами; после правок — проверяй (terminal: тесты/запуск).\n"
++    "3. Нужны свежие факты — web_search/web_fetch.\n"
++    "4. Не выдумывай содержимое файлов — читай их.\n"
++    "5. Отвечай и пиши итоги по-русски.\n"
++    "6. Когда задача полностью выполнена — вызови finish с кратким понятным итогом.\n"
++    "За один ход можешь вызвать один или несколько инструментов; опирайся на их результаты."
++)
++
++
++def _short(obj, n=1500):
++    try:
++        s = obj if isinstance(obj, str) else json.dumps(obj, ensure_ascii=False, default=str)
++    except Exception:
++        s = str(obj)
++    return s[:n]
++
++
++class AgentLoop:
++    def __init__(self, router, adapters, executor, emit=None, approval=None,
++                 session_id=None, job=None, job_manager=None, profile=None,
++                 policy="balanced", budget=None, memory=None):
++        self.router = router
++        self.adapters = adapters
++        self.executor = executor
++        self.emit = emit or (lambda *a, **k: None)
++        self.approval = approval
++        self.session_id = session_id
++        self.job = job
++        self.job_manager = job_manager
++        self.profile = profile
++        self.policy = policy
++        self.budget = budget
++        self.memory = memory
++
++    def _cancelled(self):
++        return bool(getattr(getattr(self, "job", None), "cancel_requested", False))
++
++    def _candidates(self, role="executor"):
++        cands = self.router.policy_rank(role, self.policy, requires_tools=True, budget=self.budget)
++        pref = getattr(self.profile, "executor", None) if self.profile else None
++        if pref:
++            cands = sorted(cands, key=lambda m: 0 if (m.model == pref or m.provider == pref) else 1)
++        return cands
++
++    def _chat(self, messages, role="executor"):
++        """One model turn with adaptive provider fallback. Returns (reply, model)."""
++        cands = self._candidates(role)
++        if not cands:
++            raise ProviderError("Нет доступной модели с поддержкой инструментов")
++        errors, tried = [], set()
++        while cands:
++            m = cands.pop(0)
++            if m.model in tried:
++                continue
++            tried.add(m.model)
++            adapter = self.adapters.get(m.model) or self.adapters.get(m.provider)
++            if not adapter or not hasattr(adapter, "chat"):
++                errors.append(f"{m.provider}: адаптер недоступен")
++                continue
++            self.emit("provider.selected", m.provider + "/" + m.model, role=role,
++                      score=self.router.score(m, role))
++            started = time.time()
++            try:
++                reply = adapter.chat(messages, model=m.model, cwd=self.executor.ws.root)
++                elapsed = time.time() - started
++                self.router.report_success(m)
++                self.router.record_task(m, role, True, elapsed)
++                return reply, m
++            except Exception as e:
++                elapsed = time.time() - started
++                err = str(e)[:200]
++                failure = self.router.report_failure(m, error=err)
++                self.router.record_task(m, role, False, elapsed)
++                errors.append(f"{m.provider}: {err}")
++                self.emit("provider.failed", err, provider=m.provider, model=m.model,
++                          category=failure["category"], cooldown_seconds=failure["cooldown_seconds"])
++                cands = [c for c in self.router.fallback_policy(failure["category"], role, self.policy, exclude=tried)]
++        raise ProviderError("Все провайдеры недоступны: " + "; ".join(errors[:5]))
++
++    def run(self, task, max_steps=40, role="executor"):
++        context = ""
++        if self.memory:
++            try:
++                context = self.memory.get_context()
++            except Exception:
++                context = ""
++        user = task if not context else "ПАМЯТЬ ПРОЕКТА:\n" + context + "\n\nЗАДАЧА:\n" + task
++        messages = [{"role": "system", "content": SYSTEM_PROMPT},
++                    {"role": "user", "content": user}]
++        observations, completed = [], []
++        summary, status = "", "max_steps"
++        last_text = ""
++
++        for step in range(1, max_steps + 1):
++            if self._cancelled():
++                status = "cancelled"; summary = "Остановлено пользователем."; break
++
++            reply, model = self._chat(messages, role=role)
++            text = (reply.get("text") or "").strip()
++            calls = reply.get("tool_calls") or []
++            last_text = text or last_text
++            if text:
++                self.emit("assistant", text, step=step, model=model.provider + "/" + model.model)
++
++            # Record the assistant turn (with any tool calls) in history.
++            messages.append({"role": "assistant", "content": text,
++                             "tool_calls": [{"id": c["id"], "name": c["name"], "args": c.get("args") or {}} for c in calls]})
++
++            if not calls:
++                # No tool call -> the model's message is the final answer.
++                status = "completed"; summary = text or summary; break
++
++            finished = False
++            for c in calls:
++                name, args, cid = c.get("name"), (c.get("args") or {}), c.get("id")
++                if name in ("finish", "done", "final"):
++                    summary = args.get("summary") or args.get("result") or text or "Готово."
++                    status = "completed"; finished = True
++                    messages.append({"role": "tool", "tool_call_id": cid, "name": name, "content": "OK"})
++                    break
++
++                # Approval gate for state-changing tools.
++                if self.approval and name not in READONLY:
++                    if not self.approval.request(self.session_id, name, args):
++                        self.emit("approval.waiting", f"Требуется подтверждение: {name}", tool=name, args=args)
++                        if self.job is not None and self.job_manager:
++                            self.job_manager.set_waiting(self.job)
++                        if not self.approval.wait_for(self.session_id, name, args):
++                            result = {"ok": False, "error": "отклонено пользователем или таймаут"}
++                            self.emit("tool.result", name, result=result)
++                            messages.append({"role": "tool", "tool_call_id": cid, "name": name, "content": _short(result)})
++                            continue
++                        if self.job is not None and self.job_manager:
++                            self.job_manager.set_running(self.job)
++
++                self.emit("tool.call", name, args=args, step=step)
++                try:
++                    result = self.executor.execute(name, args)
++                except Exception as e:
++                    result = {"ok": False, "error": str(e)[:500]}
++                self.emit("tool.result", name, result=result)
++                observations.append(f"{name}({_short(args,200)}) → {_short(result,400)}")
++                if name == "write_file" and result.get("ok"):
++                    completed.append("Записан файл " + str(args.get("path", "")))
++                messages.append({"role": "tool", "tool_call_id": cid, "name": name, "content": _short(result, 4000)})
++
++            if finished:
++                break
++            if self.budget is not None and self.budget <= 0:
++                status = "budget"; break
++
++        if status == "max_steps" and not summary:
++            summary = last_text or "Достигнут лимит шагов."
++        if self.memory and completed:
++            try:
++                self.memory.remember_result(task, "\n".join(observations[-8:]))
++            except Exception:
++                pass
++        return {"status": status, "summary": summary, "iterations": step,
++                "completed": completed, "observations": observations, "plan": []}
+diff --git a/core/orchestrator.py b/core/orchestrator.py
+index d0e6df7..1ba1813 100644
+--- a/core/orchestrator.py
++++ b/core/orchestrator.py
+@@ -68,7 +68,22 @@ class Orchestrator:
+         except Exception:
+             return ""
+ 
++    def run_solo(self,task,max_iterations=40,policy="balanced",budget=None):
++        """Unified single-loop agent (Phase 1)."""
++        from .agent_loop import AgentLoop
++        from .tool_executor import ToolExecutor
++        executor=ToolExecutor(self.workspace)
++        executor.job=getattr(self,"job",None); executor.manager=getattr(self,"job_manager",None)
++        loop=AgentLoop(self.router,self.adapters,executor,emit=self.emit,approval=self.approval,
++                       session_id=self.session_id,job=getattr(self,"job",None),
++                       job_manager=getattr(self,"job_manager",None),profile=getattr(self,"profile",None),
++                       policy=policy,budget=budget,memory=self.memory)
++        result=loop.run(task,max_steps=max(1,min(max_iterations,60)))
++        return result
++
+     def run(self,task,mode="agent",max_iterations=30,policy="balanced",budget=None):
++        if mode=="solo":
++            return self.run_solo(task,max_iterations=max_iterations,policy=policy,budget=budget)
+         original_task=task
+         self.policy=policy
+         self.budget=budget
+diff --git a/core/tool_schema.py b/core/tool_schema.py
+new file mode 100644
+index 0000000..e47f0c6
+--- /dev/null
++++ b/core/tool_schema.py
+@@ -0,0 +1,63 @@
++"""Single source of truth for the agent's tool catalogue.
++
++Tool names/args match ToolExecutor.execute. We emit the catalogue in two wire
++formats — OpenAI (`tools`/`tool_calls`) and Anthropic (`tools`/`tool_use`) — so
++every provider can use native function-calling; providers without it fall back
++to a JSON-line protocol built from the same catalogue (see adapters).
++"""
++
++# name -> (description, json-schema properties, required[])
++TOOLS = {
++    "read_file": ("Прочитать файл в рабочей области.",
++                  {"path": {"type": "string"}}, ["path"]),
++    "write_file": ("Создать или полностью перезаписать файл.",
++                   {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
++    "append_file": ("Дописать текст в конец файла.",
++                    {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
++    "replace_in_file": ("Точечная правка: заменить фрагмент 'old' на 'new' (old должен встречаться ровно один раз).",
++                        {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}}, ["path", "old", "new"]),
++    "list_files": ("Список файлов рабочей области (или подпапки).",
++                   {"path": {"type": "string"}}, []),
++    "search": ("Найти подстроку в файлах рабочей области.",
++               {"query": {"type": "string"}, "path": {"type": "string"}}, ["query"]),
++    "web_search": ("Поиск в интернете, возвращает ссылки и сниппеты.",
++                   {"query": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]),
++    "web_fetch": ("Скачать веб-страницу как текст.",
++                  {"url": {"type": "string"}}, ["url"]),
++    "terminal": ("Выполнить shell-команду в рабочей области (timeout сек, макс 300).",
++                 {"command": {"type": "string"}, "timeout": {"type": "integer"}}, ["command"]),
++    "git_status": ("git status --short.", {}, []),
++    "git_diff": ("git diff.", {}, []),
++    "git_branch": ("Текущая git-ветка.", {}, []),
++    "git_log": ("Последние коммиты.", {}, []),
++    "finish": ("Завершить задачу. summary — краткий понятный итог для пользователя на русском.",
++               {"summary": {"type": "string"}}, ["summary"]),
++}
++
++# Tools that only read / are safe to auto-run even under stricter policies.
++READONLY = {"read_file", "list_files", "search", "web_search", "web_fetch",
++            "git_status", "git_diff", "git_branch", "git_log", "finish"}
++
++
++def _schema(props, required):
++    return {"type": "object", "properties": props, "required": required}
++
++
++def openai_tools():
++    return [{"type": "function", "function": {
++        "name": n, "description": d, "parameters": _schema(p, r)}}
++        for n, (d, p, r) in TOOLS.items()]
++
++
++def anthropic_tools():
++    return [{"name": n, "description": d, "input_schema": _schema(p, r)}
++            for n, (d, p, r) in TOOLS.items()]
++
++
++def catalogue_text():
++    """Plain-text tool list for the JSON-line fallback (Claude Code / Ollama)."""
++    lines = []
++    for n, (d, p, r) in TOOLS.items():
++        args = ", ".join(p.keys())
++        lines.append(f"- {n}({args}) — {d}")
++    return "\n".join(lines)
+diff --git a/deploy/nginx-agent.conf b/deploy/nginx-agent.conf
+index 4f9b975..c95cfec 100644
+--- a/deploy/nginx-agent.conf
++++ b/deploy/nginx-agent.conf
+@@ -12,8 +12,10 @@
+ map $http_upgrade $ans_conn_upgrade { default upgrade; '' close; }
+ 
+ server {
++    # HTTP/2 opt-in is version-specific: nginx >=1.25 uses `http2 on;`, older
++    # (e.g. 1.18) uses `listen ... ssl http2;`. Left off for broad compatibility
++    # (HTTP/1.1 over the SNI stream is fine for this app).
+     listen 127.0.0.1:10447 ssl;
+-    http2 on;
+     server_name agent.ansservice.ru;
+ 
+     # Self-signed достаточно: TLS до пользователя терминирует Cloudflare (Full).
+diff --git a/tests/test_agent_loop_v2.py b/tests/test_agent_loop_v2.py
+new file mode 100644
+index 0000000..e6e012c
+--- /dev/null
++++ b/tests/test_agent_loop_v2.py
+@@ -0,0 +1,94 @@
++"""Tests for the unified agent loop (Phase 1) and native tool-calling."""
++import json
++from core import adapters as A
++from core.agent_loop import AgentLoop
++from core.tool_executor import ToolExecutor
++from core.router import ModelRouter
++from core.registry import ModelRegistry
++from core.types import ModelCandidate
++
++
++def test_openai_chat_parses_tool_calls(monkeypatch):
++    monkeypatch.setenv("OPENAI_API_KEY", "k")
++    resp = {"choices": [{"message": {"content": "думаю",
++            "tool_calls": [{"id": "c1", "function": {"name": "list_files", "arguments": "{}"}}]}}]}
++    class R:
++        def read(self): return json.dumps(resp).encode()
++        def __enter__(self): return self
++        def __exit__(self, *a): return False
++    monkeypatch.setattr(A.urllib.request, "urlopen", lambda req, timeout=0: R())
++    ad = A.OpenAICompatibleAdapter("openai", "https://api.openai.com/v1", "OPENAI_API_KEY", "gpt-x")
++    out = ad.chat([{"role": "user", "content": "покажи файлы"}])
++    assert out["text"] == "думаю"
++    assert out["tool_calls"][0]["name"] == "list_files"
++    assert out["tool_calls"][0]["id"] == "c1"
++
++
++def test_to_anthropic_groups_tool_results():
++    msgs = [
++        {"role": "system", "content": "sys"},
++        {"role": "user", "content": "hi"},
++        {"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "name": "list_files", "args": {}}]},
++        {"role": "tool", "tool_call_id": "t1", "name": "list_files", "content": "[]"},
++    ]
++    system, out = A._to_anthropic(msgs)
++    assert system == "sys"
++    assert out[0]["role"] == "user"
++    assert out[1]["role"] == "assistant"
++    assert any(b["type"] == "tool_use" for b in out[1]["content"])
++    assert out[2]["role"] == "user" and out[2]["content"][0]["type"] == "tool_result"
++
++
++def _router(tmp_path):
++    rt = ModelRouter(ModelRegistry.default())
++    rt.db = str(tmp_path / "r.db")
++    rt._available = lambda m: True
++    rt.policy_rank = lambda role, *a, **k: [ModelCandidate("p", "m", {"executor"}, tool_capable=True, priority=1)]
++    return rt
++
++
++def test_agent_loop_runs_tool_then_finishes(tmp_path):
++    calls = {"n": 0}
++    class FakeAdapter:
++        def chat(self, messages, **kwargs):
++            calls["n"] += 1
++            if calls["n"] == 1:
++                return {"text": "создаю файл", "tool_calls": [
++                    {"id": "c1", "name": "write_file", "args": {"path": "hello.txt", "content": "привет"}}]}
++            return {"text": "готово", "tool_calls": [
++                {"id": "c2", "name": "finish", "args": {"summary": "Файл создан."}}]}
++    ex = ToolExecutor(str(tmp_path))
++    loop = AgentLoop(_router(tmp_path), {"m": FakeAdapter()}, ex, emit=lambda *a, **k: None)
++    res = loop.run("создай файл hello.txt", max_steps=10)
++    assert res["status"] == "completed"
++    assert res["summary"] == "Файл создан."
++    assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "привет"
++
++
++def test_agent_loop_plain_answer_finishes(tmp_path):
++    class FakeAdapter:
++        def chat(self, messages, **kwargs):
++            return {"text": "Ответ без инструментов.", "tool_calls": []}
++    ex = ToolExecutor(str(tmp_path))
++    loop = AgentLoop(_router(tmp_path), {"m": FakeAdapter()}, ex, emit=lambda *a, **k: None)
++    res = loop.run("привет", max_steps=5)
++    assert res["status"] == "completed"
++    assert "без инструментов" in res["summary"]
++
++
++def test_agent_loop_falls_back_across_providers(tmp_path):
++    rt = ModelRouter(ModelRegistry.default())
++    rt.db = str(tmp_path / "r.db"); rt._available = lambda m: True
++    rt.policy_rank = lambda role, *a, **k: [
++        ModelCandidate("bad", "b", {"executor"}, tool_capable=True, priority=1),
++        ModelCandidate("good", "g", {"executor"}, tool_capable=True, priority=2)]
++    rt.fallback_policy = lambda cat, role, policy, exclude=None: [
++        ModelCandidate("good", "g", {"executor"}, tool_capable=True, priority=2)]
++    class Bad:
++        def chat(self, messages, **kwargs): raise RuntimeError("boom")
++    class Good:
++        def chat(self, messages, **kwargs): return {"text": "ок", "tool_calls": [{"id": "c", "name": "finish", "args": {"summary": "done"}}]}
++    ex = ToolExecutor(str(tmp_path))
++    loop = AgentLoop(rt, {"b": Bad(), "g": Good()}, ex, emit=lambda *a, **k: None)
++    res = loop.run("сделай", max_steps=5)
++    assert res["status"] == "completed" and res["summary"] == "done"
+diff --git a/web/app.js b/web/app.js
+index 79b6bcf..6f04b25 100644
+--- a/web/app.js
++++ b/web/app.js
+@@ -96,6 +96,7 @@ function agentEvent(x){
+   if(k==='run.started')actLine('info','▸ Задача принята ('+(x.mode||'agent')+')');
+   else if(k==='profile.selected')actLine('info','▸ Профиль: '+esc(String(m)));
+   else if(k==='task.graph'){let n=null;try{const p=typeof m==='string'?JSON.parse(m):m;n=Array.isArray(p)?p.length:(p&&p.nodes?Object.keys(p.nodes).length:null);}catch(_){}actLine('plan','🗺 План'+(n?': '+n+' шаг(ов)':' составлен'));}
++  else if(k==='assistant'){const d=document.createElement('div');d.className='act act-assistant';d.innerHTML=md(String(m));agentActivity&&agentActivity.appendChild(d);scrollEl($('agentThread'));}
+   else if(k==='provider.selected')actLine('model','→ '+esc(String(m))+(x.role?' · '+x.role:''));
+   else if(k==='step.started')actLine('step','● '+esc(String(m)));
+   else if(k==='tool.call')actLine('tool','🔧 '+esc(String(m))+' '+esc(JSON.stringify(x.args||{}).slice(0,160)));
+diff --git a/web/index.html b/web/index.html
+index c0a6856..784a06d 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -37,7 +37,7 @@
+   <section class="view" data-view="agent">
+     <div class="chat-wrap">
+       <div class="chat-bar">
+-        <select id="agentMode" title="Режим работы"><option value="agent">Агент</option><option value="autopilot">Автопилот</option></select>
++        <select id="agentMode" title="Режим работы"><option value="solo">Агент</option><option value="agent">Пошаговый</option><option value="autopilot">Автопилот</option></select>
+         <select id="policy" title="Политика выбора модели"><option value="balanced">Баланс</option><option value="cheap">Экономно</option><option value="quality">Качество</option></select>
+         <select id="profile" title="Профиль"><option value="developer">Разработка</option><option value="game_developer">Геймдев</option><option value="researcher">Исследование</option><option value="budget">Бюджет</option></select>
+         <input id="budget" type="number" min="0" step="0.01" placeholder="$ лимит">
+diff --git a/web/style.css b/web/style.css
+index f69585f..3f940a9 100644
+--- a/web/style.css
++++ b/web/style.css
+@@ -55,6 +55,7 @@ main{display:block}
+ .act-plan{color:#cdb3ff}.act-model{color:#8fd0ff}.act-step{color:#e8eaed;font-weight:600}
+ .act-tool{color:#f0c674}.act-toolres{color:#7f8994}.act-review{color:#b7c3cf}
+ .act-ok{color:#75d78c}.act-warn{color:#e0b050}.act-err,.act-error{color:#e77b7b}.act-info{color:#8c96a2}
++.act-assistant{color:#e3e8ee;border-bottom:0;padding:6px 0;line-height:1.5;font-family:Inter,system-ui,sans-serif}
+ .agent-final{margin-top:10px}
+ .final-good{color:#75d78c;font-weight:650;margin-bottom:6px}
+ .final-bad{color:#e77b7b;font-weight:650}
