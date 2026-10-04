@@ -149,6 +149,32 @@ def test_session_events_retrievable(monkeypatch):
     assert "chat.user" in kinds and "chat.assistant" in kinds
 
 
+def test_delete_session_endpoint(monkeypatch):
+    monkeypatch.setattr(appmod, "AUTH_TOKEN", "tok")
+    h = {"Authorization": "Bearer tok"}
+    s = appmod.sessions.create("на удаление", "chat")
+    assert client.delete(f"/sessions/{s.id}", headers=h).json()["ok"] is True
+    assert client.get(f"/sessions/{s.id}", headers=h).status_code == 404
+
+
+def test_workspace_file_delete_and_download(monkeypatch, tmp_path):
+    monkeypatch.setattr(appmod, "AUTH_TOKEN", "tok")
+    monkeypatch.setattr(appmod, "WORKSPACE", str(tmp_path))
+    h = {"Authorization": "Bearer tok"}
+    (tmp_path / "a.txt").write_text("привет", encoding="utf-8")
+    # download
+    r = client.get("/workspace/download?path=a.txt", headers=h)
+    assert r.status_code == 200 and "привет" in r.text
+    # zip
+    z = client.get("/workspace/zip", headers=h)
+    assert z.status_code == 200 and z.headers["content-type"] == "application/zip"
+    # delete
+    assert client.request("DELETE", "/workspace/file?path=a.txt", headers=h).json()["ok"] is True
+    assert not (tmp_path / "a.txt").exists()
+    # traversal blocked
+    assert client.request("DELETE", "/workspace/file?path=../etc/passwd", headers=h).status_code == 400
+
+
 def test_session_history_persists_after_restart(monkeypatch, tmp_path):
     # A fresh store (simulating a restart) must reload dialogue events from the DB
     # so the user can reopen previous conversations.

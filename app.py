@@ -340,8 +340,41 @@ def decide_approval(sid:str,req:ApprovalRequest,_:None=Depends(auth)):
     item=approvals.decide(sid,req.allow)
     return {"ok":True,"approved":bool(item)}
 
+@app.delete("/sessions/{sid}")
+def delete_session(sid:str,_:None=Depends(auth)):
+    return {"ok":sessions.delete(sid)}
+
 @app.get("/workspace/files")
 def workspace_files(_:None=Depends(auth)): return {"files":Workspace(WORKSPACE).list()}
+
+@app.delete("/workspace/file")
+def delete_workspace_file(path:str,_:None=Depends(auth)):
+    try:
+        p=Workspace(WORKSPACE)._path(path)
+        if not os.path.isfile(p): raise HTTPException(404,"file not found")
+        os.remove(p); return {"ok":True}
+    except HTTPException: raise
+    except Exception as e: raise HTTPException(400,str(e))
+
+@app.get("/workspace/download")
+def download_workspace_file(path:str,_:None=Depends(auth)):
+    try: p=Workspace(WORKSPACE)._path(path)
+    except Exception as e: raise HTTPException(400,str(e))
+    if not os.path.isfile(p): raise HTTPException(404,"file not found")
+    return FileResponse(str(p),filename=os.path.basename(str(p)),media_type="application/octet-stream")
+
+@app.get("/workspace/zip")
+def zip_workspace(_:None=Depends(auth)):
+    import tempfile,zipfile
+    fd,zpath=tempfile.mkstemp(suffix=".zip"); os.close(fd)
+    with zipfile.ZipFile(zpath,"w",zipfile.ZIP_DEFLATED) as z:
+        for root,dirs,files in os.walk(WORKSPACE):
+            if ".git" in root.split(os.sep): continue
+            for f in files:
+                fp=os.path.join(root,f)
+                try: z.write(fp,os.path.relpath(fp,WORKSPACE))
+                except Exception: pass
+    return FileResponse(zpath,filename="workspace.zip",media_type="application/zip")
 
 @app.get("/workspace/file")
 def workspace_file(path:str,_:None=Depends(auth)):

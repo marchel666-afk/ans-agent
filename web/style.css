@@ -67,6 +67,11 @@ main{display:block}
 .recent-item{padding:7px 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#8b939d;cursor:pointer;border-radius:6px}
 .recent-item:hover{background:#181c21;color:#fff}
 .session-item{cursor:pointer}
+.file-row{display:flex;align-items:center;justify-content:space-between;gap:8px;border-radius:5px}
+.file-row:hover{background:#181c21}
+.file-row .file{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-acts{display:flex;gap:4px;flex-shrink:0}
+.file-acts .mini{padding:2px 7px;font-size:12px}
 
 /* ---- login ---- */
 .login-card{width:min(400px,92vw);text-align:center}

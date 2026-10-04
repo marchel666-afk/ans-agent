@@ -38,3 +38,9 @@ class SessionStore:
  def list(self):
   with self._db() as c: rows=c.execute("SELECT * FROM sessions ORDER BY created_at").fetchall()
   return [Session(id=r["id"],task=r["task"],mode=r["mode"],created_at=r["created_at"]) for r in rows]
+ def delete(self,sid):
+  self.sessions.pop(sid,None)
+  with self._db() as c:
+   c.execute("DELETE FROM events WHERE session_id=?",(sid,))
+   cur=c.execute("DELETE FROM sessions WHERE id=?",(sid,))
+   return cur.rowcount>0

@@ -187,7 +187,16 @@ async function saveModel(i){const m=modelPoolCache[i];const priority=Number($('p
 async function discoverModels(){const x=await(await api('/model-pool/discover',{method:'POST'})).json();alert('OpenRouter: добавлено моделей — '+(x.added||0));await loadModelPool();renderModelManager();}
 
 /* ---------- файлы ---------- */
-async function loadFiles(){try{const x=await(await api('/workspace/files')).json();$('files').innerHTML=x.files.map(f=>'<div class="file" data-path="'+encodeURIComponent(f)+'">'+f+'</div>').join('');document.querySelectorAll('#files .file').forEach(el=>el.onclick=()=>openFile(decodeURIComponent(el.dataset.path)));}catch(e){$('files').textContent='Рабочая область недоступна';}}
+async function loadFiles(){try{const x=await(await api('/workspace/files')).json();
+  $('files').innerHTML=x.files.length?x.files.map(f=>'<div class="file-row"><span class="file" data-path="'+encodeURIComponent(f)+'">'+esc(f)+'</span><span class="file-acts"><button class="mini" data-dl="'+encodeURIComponent(f)+'" title="Скачать">↓</button><button class="mini" data-del="'+encodeURIComponent(f)+'" title="Удалить">✕</button></span></div>').join(''):'<div class="empty">Файлов нет.</div>';
+  document.querySelectorAll('#files .file').forEach(el=>el.onclick=()=>openFile(decodeURIComponent(el.dataset.path)));
+  document.querySelectorAll('#files [data-dl]').forEach(el=>el.onclick=()=>downloadFile(decodeURIComponent(el.dataset.dl)));
+  document.querySelectorAll('#files [data-del]').forEach(el=>el.onclick=()=>deleteFile(decodeURIComponent(el.dataset.del)));
+}catch(e){$('files').textContent='Рабочая область недоступна';}}
+async function downloadBlob(url,name){const r=await api(url);if(!r.ok){alert('Не удалось скачать');return;}const b=await r.blob();const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),1000);}
+function downloadFile(path){downloadBlob('/workspace/download?path='+encodeURIComponent(path),path.split('/').pop());}
+function downloadZip(){downloadBlob('/workspace/zip','workspace.zip');}
+async function deleteFile(path){if(!confirm('Удалить файл '+path+'?'))return;const r=await api('/workspace/file?path='+encodeURIComponent(path),{method:'DELETE'});if(r.ok)loadFiles();else alert('Не удалось удалить');}
 async function openFile(path){try{const x=await(await api('/workspace/file?path='+encodeURIComponent(path))).json();$('filename').textContent=x.path;$('filecontent').value=x.content;}catch(e){$('filecontent').value='Не удалось прочитать файл';}}
 async function loadGit(){try{$('git').textContent=(await(await api('/workspace/status')).json()).stdout||'Дерево чистое';}catch(e){$('git').textContent='Рабочая область недоступна';}}
 async function loadDiff(){try{const x=await(await api('/workspace/diff')).json();const d=x.diff;$('diff').textContent=typeof d==='string'?(d||'Нет изменений'):JSON.stringify(d,null,2);}catch(e){$('diff').textContent='Рабочая область недоступна';}}
@@ -225,7 +234,12 @@ async function openSession(id){
     else{if(socket)try{socket.close();}catch(_){}threadClear('agentThread','');currentSession=sess.id;currentJob=null;replayAgent(sess);setView('agent');}
   }catch(e){alert('Не удалось открыть диалог: '+e.message);}
 }
-async function loadSessions(){try{const ss=await(await api('/sessions')).json();const box=$('sessionList');if(box){box.innerHTML=ss.slice().reverse().map(s=>'<div class="file session-item" data-id="'+s.id+'" title="'+s.id+'">['+(s.mode==='chat'?'чат':'агент')+'] '+esc(s.task||s.id)+' <small>· '+s.events+' соб.</small></div>').join('')||'Диалогов пока нет.';box.querySelectorAll('.session-item').forEach(el=>el.onclick=()=>openSession(el.dataset.id));}}catch(e){const box=$('sessionList');if(box)box.textContent='Недоступно';}}
+async function loadSessions(){try{const ss=await(await api('/sessions')).json();const box=$('sessionList');if(box){
+  box.innerHTML=ss.length?ss.slice().reverse().map(s=>'<div class="file-row"><span class="file session-item" data-id="'+s.id+'" title="'+s.id+'">['+(s.mode==='chat'?'чат':'агент')+'] '+esc(s.task||s.id)+' <small>· '+s.events+' соб.</small></span><span class="file-acts"><button class="mini" data-delses="'+s.id+'" title="Удалить">✕</button></span></div>').join(''):'<div class="empty">Диалогов пока нет.</div>';
+  box.querySelectorAll('.session-item').forEach(el=>el.onclick=()=>openSession(el.dataset.id));
+  box.querySelectorAll('[data-delses]').forEach(el=>el.onclick=()=>deleteSession(el.dataset.delses));
+}}catch(e){const box=$('sessionList');if(box)box.textContent='Недоступно';}}
+async function deleteSession(id){if(!confirm('Удалить этот диалог?'))return;const r=await api('/sessions/'+id,{method:'DELETE'});if(r.ok){loadSessions();load();}else alert('Не удалось удалить');}
 
 /* ---------- диагностика / состояние ---------- */
 function openSetup(){$('setupModal').classList.remove('hidden');runDiagnostics();}
